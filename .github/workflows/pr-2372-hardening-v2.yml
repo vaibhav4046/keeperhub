@@ -1,0 +1,125 @@
+name: PR 2372 Hardening v2
+
+on:
+  push:
+    branches: [automation/pr-2372-hardening]
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout automation branch
+        uses: actions/checkout@v4
+        with:
+          ref: automation/pr-2372-hardening
+          fetch-depth: 0
+
+      - name: Extract guarded transformation
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          text = Path('.github/workflows/pr-2372-hardening.yml').read_text()
+          start_marker = "          python3 <<'PY'\n"
+          end_marker = "          PY\n\n      - name: Setup pnpm"
+          start = text.index(start_marker) + len(start_marker)
+          end = text.index(end_marker, start)
+          lines = text[start:end].splitlines()
+          body = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+          Path('/tmp/pr2372-harden.py').write_text(body)
+          compile(body, '/tmp/pr2372-harden.py', 'exec')
+          PY
+
+      - name: Checkout target at current staging base
+        run: |
+          set -euo pipefail
+          git config user.name "vaibhav4046"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git fetch origin fix/issue-1840-release-key-on-definite-failure
+          git checkout -B fix/issue-1840-release-key-on-definite-failure origin/fix/issue-1840-release-key-on-definite-failure
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git || true
+          git fetch upstream staging
+          git rebase upstream/staging
+
+      - name: Apply broadcast-evidence hardening
+        run: python3 /tmp/pr2372-harden.py
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Format changed source
+        run: |
+          pnpm exec biome check --write \
+            lib/idempotency-disposition.ts \
+            lib/web3/submit-signed.ts \
+            app/api/execute/transfer/route.ts \
+            plugins/web3/steps/transfer-funds-core.ts \
+            plugins/web3/steps/transfer-token-core.ts \
+            plugins/web3/steps/write-contract-core.ts \
+            plugins/web3/steps/approve-token-core.ts \
+            plugins/web3/steps/batch-write-contract-core.ts \
+            plugins/web3/steps/transfer-spl-token-core.ts \
+            plugins/robinhood/steps/trade-stock-token-core.ts \
+            plugins/tempo/steps/tempo-tx-core.ts \
+            plugins/tempo/steps/transfer-with-memo.ts \
+            plugins/tempo/steps/dex-swap.ts \
+            plugins/tempo/steps/batch-payout.ts \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/unit/idempotency-broadcast-evidence-coverage.test.ts
+
+      - name: Focused safety tests
+        run: |
+          pnpm vitest run \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/unit/idempotency-broadcast-evidence-coverage.test.ts \
+            tests/unit/submit-signed-failover.test.ts \
+            tests/unit/tempo-transfer-with-memo.test.ts \
+            tests/unit/tempo-dex-swap.test.ts \
+            tests/unit/tempo-batch-payout.test.ts
+
+      - name: Existing issue 1840 tests
+        run: |
+          pnpm vitest run \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/idempotency.test.ts \
+            tests/unit/submit-signed.test.ts
+
+      - name: Typecheck
+        run: pnpm type-check
+
+      - name: API docs validation
+        run: pnpm check:api-docs
+
+      - name: Full Biome check
+        run: pnpm check
+
+      - name: Verify and commit
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --stat upstream/staging
+          if git diff upstream/staging -- .github/workflows | grep -q .; then
+            echo "unexpected workflow diff on target branch"
+            exit 1
+          fi
+          git reset --soft upstream/staging
+          git add -A
+          git commit -m "fix: harden #1840 broadcast evidence"
+
+      - name: Push verified target branch
+        run: git push --force-with-lease origin HEAD:fix/issue-1840-release-key-on-definite-failure
