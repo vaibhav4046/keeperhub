@@ -1,4 +1,4 @@
-name: PR 2372 final hardening verification
+name: PR 2372 final combined verification
 
 on:
   push:
@@ -11,11 +11,11 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: db2f3a8fd98d115acd8b31b9d00991f42994cf53
+          ref: 4cf644f856f58ea83b6b62997856410f683a9f6e
           fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
@@ -30,100 +30,35 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Apply verified hardening to exact PR HEAD
+      - name: Apply only the green broadcaster hardening
         run: |
-          git show origin/automation/pr-2372-hardening:.github/scripts/pr2372_harden_v4.py > /tmp/pr2372_harden.py
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('/tmp/pr2372_harden.py')
-          s = p.read_text()
-          write_tuple = '    ("plugins/web3/steps/write-contract-core.ts", "writeContractCore", "WriteContractCoreInput", "WriteContractResult", "WriteContractResult"),\n'
-          if s.count(write_tuple) != 1:
-              raise SystemExit('could not isolate current write-contract core from v4 transform')
-          s = s.replace(write_tuple, '', 1)
-          spl_wrap = 'wrap_export(path, "transferSplTokenCore", "TransferSplTokenCoreInput", "TransferSplTokenResult")\n'
-          if s.count(spl_wrap) != 1:
-              raise SystemExit('could not isolate SPL wrapper')
-          s = s.replace(spl_wrap, '', 1)
-          start = s.find('# Tempo route-facing actions propagate')
-          end = s.find('# Shared evidence now covers Solana;')
-          if start < 0 or end < 0 or end <= start:
-              raise SystemExit('could not isolate old Tempo handler transform')
-          s = s[:start] + s[end:]
-          p.write_text(s)
-          PY
-          python3 /tmp/pr2372_harden.py
-          git show origin/automation/pr2372-verify-db2f3a8:.github/scripts/pr2372_post_harden_v5.py > /tmp/pr2372_post.py
-          python3 /tmp/pr2372_post.py
-          git show origin/automation/pr2372-verify-db2f3a8:.github/scripts/pr2372_tempo_post_v5.py > /tmp/pr2372_tempo_post.py
-          python3 /tmp/pr2372_tempo_post.py
-          rm -f tests/unit/idempotency-broadcast-evidence-coverage.test.ts
-          python3 - <<'PY'
-          from pathlib import Path
+          paths=(
+            app/api/execute/transfer/route.ts
+            docs/api/direct-execution.md
+            lib/web3/submit-signed.ts
+            plugins/robinhood/steps/trade-stock-token-core.ts
+            plugins/tempo/steps/batch-payout.ts
+            plugins/tempo/steps/dex-swap.ts
+            plugins/tempo/steps/tempo-tx-core.ts
+            plugins/tempo/steps/transfer-with-memo.ts
+            plugins/web3/steps/approve-token-core.ts
+            plugins/web3/steps/batch-write-contract-core.ts
+            plugins/web3/steps/transfer-funds-core.ts
+            plugins/web3/steps/transfer-spl-token-core.ts
+            plugins/web3/steps/transfer-token-core.ts
+            plugins/web3/steps/write-contract-core.ts
+            tests/unit/idempotency.test.ts
+            tests/unit/transfer-spl-token.test.ts
+            tests/unit/write-contract-core.test.ts
+          )
+          git diff db2f3a8fd98d115acd8b31b9d00991f42994cf53..260231ee8530debe6a209b9b99dce0850cbb5aad -- "${paths[@]}" > /tmp/hardening.patch
+          test -s /tmp/hardening.patch
+          git apply --index --3way /tmp/hardening.patch
+          git diff --cached --check
 
-          p = Path('tests/unit/execute-protocol-idempotency-disposition.test.ts')
-          s = p.read_text()
-          duplicate = '      broadcastAttempted: false,\n      broadcastAttempted: false,\n'
-          if s.count(duplicate) != 4:
-              raise SystemExit(f'expected 4 duplicate sandbox fixture fields, found {s.count(duplicate)}')
-          p.write_text(s.replace(duplicate, '      broadcastAttempted: false,\n'), newline='\n')
-
-          p = Path('plugins/web3/steps/transfer-spl-token-core.ts')
-          s = p.read_text()
-          malformed = '| { success: false; error: string     broadcastAttempted?: boolean;\n    };'
-          if s.count(malformed) != 1:
-              raise SystemExit(f'expected malformed SPL arm once, found {s.count(malformed)}')
-          p.write_text(s.replace(malformed, '''| {\n      success: false;\n      error: string;\n      broadcastAttempted?: boolean;\n    };'''), newline='\n')
-
-          p = Path('tests/unit/transfer-spl-token.test.ts')
-          s = p.read_text()
-          old = '''    expect(result).toEqual({\n      success: false,\n      error: expect.stringContaining("Simulation failed"),\n    });'''
-          new = '''    expect(result).toEqual({\n      success: false,\n      error: expect.stringContaining("Simulation failed"),\n      broadcastAttempted: true,\n    });'''
-          if s.count(old) != 1:
-              raise SystemExit('SPL send-failure assertion not found once')
-          p.write_text(s.replace(old, new, 1), newline='\n')
-
-          p = Path('tests/unit/idempotency.test.ts')
-          s = p.read_text()
-          old = '    expect(dispositionForExecutionOutcome("failed")).toBe("release");'
-          new = '''    expect(\n      dispositionForExecutionOutcome("failed", { broadcastAttempted: false })\n    ).toBe("release");'''
-          if s.count(old) != 1:
-              raise SystemExit('definite-failure assertion not found once')
-          s = s.replace(old, new, 1)
-          old = '''    const seen = (["completed", "failed", "unconfirmed"] as const).map(\n      (status) => dispositionForExecutionOutcome(status)\n    );\n    expect(new Set(seen).size).toBe(3);'''
-          new = '''    const seen = [\n      dispositionForExecutionOutcome("completed"),\n      dispositionForExecutionOutcome("failed", { broadcastAttempted: false }),\n      dispositionForExecutionOutcome("unconfirmed"),\n    ];\n    expect(new Set(seen).size).toBe(3);'''
-          if s.count(old) != 1:
-              raise SystemExit('three-disposition assertion not found once')
-          p.write_text(s.replace(old, new, 1), newline='\n')
-
-          # Regression: once a receipt exists, later explorer/trace decoration
-          # failures must retain the transaction hash and attempted evidence.
-          p = Path('tests/unit/write-contract-core.test.ts')
-          s = p.read_text()
-          marker = '''  it("leaves an ordinary send failure unclassified and softenable", async () => {\n    mockExecuteContractCall.mockRejectedValueOnce(new Error("nonce too low"));\n\n    const result = await writeContractCore({\n      contractAddress: "0x1234567890123456789012345678901234567890",\n      network: "ethereum",\n      abi: VALID_ABI,\n      abiFunction: "transfer",\n      _context: { organizationId: "org-1" },\n    });\n\n    expect(result.success).toBe(false);\n    if (!result.success) {\n      expect(result.errorClass).toBeUndefined();\n    }\n    expect(applyFailOnError(result, false).success).toBe(true);\n  });\n'''
-          addition = marker + '''\n  it("retains the receipt hash when post-broadcast explorer decoration fails", async () => {\n    mockGetTransactionUrl.mockRejectedValueOnce(\n      new Error("explorer lookup unavailable")\n    );\n\n    const result = await writeContractCore({\n      contractAddress: "0x1234567890123456789012345678901234567890",\n      network: "ethereum",\n      abi: VALID_ABI,\n      abiFunction: "transfer",\n      _context: { organizationId: "org-1" },\n    });\n\n    expect(result.success).toBe(false);\n    if (!result.success) {\n      expect(result.transactionHash).toBe("0xhash");\n      expect(result.broadcastAttempted).toBe(true);\n    }\n  });\n'''
-          if s.count(marker) != 1:
-              raise SystemExit('write-contract post-broadcast insertion marker not found once')
-          p.write_text(s.replace(marker, addition, 1), newline='\n')
-
-          # Keep the retry docs truthful without shifting downstream line-based
-          # API coverage metadata: both replacements preserve line counts.
-          p = Path('docs/api/direct-execution.md')
-          s = p.read_text()
-          old = '''The send boundary preserves evidence instead of making the route guess from a\nmissing RPC reply. Directly signed EVM transactions have a deterministic hash\nbefore broadcast, so an ambiguous send keeps that hash and is held/reconciled.\nA sponsored provider can report that submission was attempted before exposing a\nhash; that explicit evidence is held too. With neither form of send evidence, a\nwrite-core failure is pre-broadcast and the key is released.'''
-          new = '''The send boundary preserves evidence instead of making the route guess from a\nmissing RPC reply. Directly signed EVM transactions retain a deterministic hash\nonce submission may have begun. Every broadcasting core also reports its boundary:\n`broadcastAttempted: false` means it proved the attempt stopped before submission;\n`true` means submission may have started. Missing evidence fails closed and keeps\nthe key rather than treating a missing hash as proof that nothing was broadcast.'''
-          if s.count(old) != 1:
-              raise SystemExit('docs evidence paragraph not found once')
-          s = s.replace(old, new, 1)
-          old = '''- The mixed-chain `/api/execute/transfer` route keeps a hashless Solana failure\n  **held**. This PR's send-boundary evidence change is EVM-specific; treating a\n  Solana no-hash result as definite would widen #1840 into an unrelated\n  duplicate-send risk.'''
-          new = '''- The mixed-chain `/api/execute/transfer` route keeps a hashless Solana failure\n  **held**. Solana send failures report attempted evidence where known, and any\n  missing evidence fails closed; absence of a signature is never treated as\n  proof that nothing reached the network.'''
-          if s.count(old) != 1:
-              raise SystemExit('docs Solana paragraph not found once')
-          p.write_text(s.replace(old, new, 1), newline='\n')
-          PY
-          mapfile -t changed < <(git diff --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
-          if ((${#changed[@]})); then pnpm biome check --write "${changed[@]}"; fi
-          git diff --check
+          printf '%s\n' "${paths[@]}" | sort > /tmp/expected
+          git diff --cached --name-only | sort > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
 
       - name: Generate plugin registry
         run: pnpm discover-plugins
@@ -149,30 +84,48 @@ jobs:
       - name: Type check
         run: pnpm type-check
 
-      - name: Biome final diff
+      - name: Biome final source set
         run: |
-          mapfile -t changed < <(git diff --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
-          if ((${#changed[@]})); then pnpm biome check "${changed[@]}"; fi
+          mapfile -t changed < <(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
+          changed+=(lib/idempotency-disposition.ts tests/unit/idempotency-disposition-evidence.test.ts)
+          pnpm biome check "${changed[@]}"
 
       - name: API docs validation
         run: pnpm check:api-docs
 
-      - name: Final diff safety
-        run: |
-          git diff --check
-          if git diff --name-only | grep -Eq '^(\.github/|scripts/)|idempotency-broadcast-evidence-coverage'; then
-            echo 'temporary verification machinery leaked into result' >&2
-            exit 1
-          fi
-          git diff --name-only
-          git diff --stat
+      - name: Full unit suite
+        run: pnpm vitest run tests/unit
 
-      - name: Commit verified result branch
+      - name: Final tree safety
+        run: |
+          git diff --cached --check
+          git diff --exit-code
+          printf '%s\n' \
+            app/api/execute/transfer/route.ts \
+            docs/api/direct-execution.md \
+            lib/web3/submit-signed.ts \
+            plugins/robinhood/steps/trade-stock-token-core.ts \
+            plugins/tempo/steps/batch-payout.ts \
+            plugins/tempo/steps/dex-swap.ts \
+            plugins/tempo/steps/tempo-tx-core.ts \
+            plugins/tempo/steps/transfer-with-memo.ts \
+            plugins/web3/steps/approve-token-core.ts \
+            plugins/web3/steps/batch-write-contract-core.ts \
+            plugins/web3/steps/transfer-funds-core.ts \
+            plugins/web3/steps/transfer-spl-token-core.ts \
+            plugins/web3/steps/transfer-token-core.ts \
+            plugins/web3/steps/write-contract-core.ts \
+            tests/unit/idempotency.test.ts \
+            tests/unit/transfer-spl-token.test.ts \
+            tests/unit/write-contract-core.test.ts | sort > /tmp/expected-final
+          git diff --cached --name-only | sort > /tmp/actual-final
+          diff -u /tmp/expected-final /tmp/actual-final
+          git diff --cached --stat
+
+      - name: Publish verified combined candidate
         run: |
           git config user.name "Vaibhav Lalwani"
           git config user.email "115102797+vaibhav4046@users.noreply.github.com"
-          git switch -c automation/pr2372-verified-result
-          git add -A
-          git diff --cached --check
+          git switch -c automation/pr2372-verified-result-v2
           git commit -m "fix: harden idempotency broadcast evidence for #1840"
-          git push origin HEAD:automation/pr2372-verified-result
+          git push origin HEAD:automation/pr2372-verified-result-v2
