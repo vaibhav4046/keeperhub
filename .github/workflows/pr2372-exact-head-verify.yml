@@ -41,6 +41,10 @@ jobs:
           if s.count(write_tuple) != 1:
               raise SystemExit('could not isolate current write-contract core from v4 transform')
           s = s.replace(write_tuple, '', 1)
+          spl_wrap = 'wrap_export(path, "transferSplTokenCore", "TransferSplTokenCoreInput", "TransferSplTokenResult")\n'
+          if s.count(spl_wrap) != 1:
+              raise SystemExit('could not isolate SPL wrapper')
+          s = s.replace(spl_wrap, '', 1)
           start = s.find('# Tempo route-facing actions propagate')
           end = s.find('# Shared evidence now covers Solana;')
           if start < 0 or end < 0 or end <= start:
@@ -70,6 +74,14 @@ jobs:
           if s.count(malformed) != 1:
               raise SystemExit(f'expected malformed SPL arm once, found {s.count(malformed)}')
           p.write_text(s.replace(malformed, '''| {\n      success: false;\n      error: string;\n      broadcastAttempted?: boolean;\n    };'''), newline='\n')
+
+          p = Path('tests/unit/transfer-spl-token.test.ts')
+          s = p.read_text()
+          old = '''    expect(result).toEqual({\n      success: false,\n      error: expect.stringContaining("Simulation failed"),\n    });'''
+          new = '''    expect(result).toEqual({\n      success: false,\n      error: expect.stringContaining("Simulation failed"),\n      broadcastAttempted: true,\n    });'''
+          if s.count(old) != 1:
+              raise SystemExit('SPL send-failure assertion not found once')
+          p.write_text(s.replace(old, new, 1), newline='\n')
 
           p = Path('tests/unit/idempotency.test.ts')
           s = p.read_text()
