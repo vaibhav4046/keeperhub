@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 def read(path: str) -> str:
@@ -31,11 +32,11 @@ def patch_action(path: str, input_t: str, result_t: str) -> None:
         '''| {\n      success: false;\n      error: string;\n      transactionHash?: string;\n      chainId?: number;\n      broadcastAttempted?: boolean;\n    };''',
         1,
     )
-    old_decl = f'''async function stepHandler(\n  input: {input_t}\n): Promise<{result_t}> {{'''
-    new_decl = f'''async function stepHandlerImpl(\n  input: {input_t}\n): Promise<{result_t}> {{'''
-    if text.count(old_decl) != 1:
-        raise SystemExit(f"{path}: handler declaration count={text.count(old_decl)}")
-    text = text.replace(old_decl, new_decl, 1)
+    pattern = rf"async function stepHandler\(\s*input: {re.escape(input_t)}\s*\): Promise<{re.escape(result_t)}> \{{"
+    repl = f"async function stepHandlerImpl(input: {input_t}): Promise<{result_t}> {{"
+    text, count = re.subn(pattern, repl, text, count=1)
+    if count != 1:
+        raise SystemExit(f"{path}: handler declaration count={count}")
     try_marker = '''  try {\n    const rpcManager = await getRpcProvider({'''
     if text.count(try_marker) != 1:
         raise SystemExit(f"{path}: main try marker count={text.count(try_marker)}")
