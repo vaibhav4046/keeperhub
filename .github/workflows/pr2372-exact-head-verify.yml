@@ -37,14 +37,22 @@ jobs:
           from pathlib import Path
           p = Path('/tmp/pr2372_harden.py')
           s = p.read_text()
-          old = '    ("plugins/web3/steps/write-contract-core.ts", "writeContractCore", "WriteContractCoreInput", "WriteContractResult", "WriteContractResult"),\n'
-          if s.count(old) != 1:
+          write_tuple = '    ("plugins/web3/steps/write-contract-core.ts", "writeContractCore", "WriteContractCoreInput", "WriteContractResult", "WriteContractResult"),\n'
+          if s.count(write_tuple) != 1:
               raise SystemExit('could not isolate current write-contract core from v4 transform')
-          p.write_text(s.replace(old, '', 1))
+          s = s.replace(write_tuple, '', 1)
+          start = s.find('# Tempo route-facing actions propagate')
+          end = s.find('# Shared evidence now covers Solana;')
+          if start < 0 or end < 0 or end <= start:
+              raise SystemExit('could not isolate old Tempo handler transform')
+          s = s[:start] + s[end:]
+          p.write_text(s)
           PY
           python3 /tmp/pr2372_harden.py
           git show origin/automation/pr2372-verify-db2f3a8:.github/scripts/pr2372_post_harden_v5.py > /tmp/pr2372_post.py
           python3 /tmp/pr2372_post.py
+          git show origin/automation/pr2372-verify-db2f3a8:.github/scripts/pr2372_tempo_post_v5.py > /tmp/pr2372_tempo_post.py
+          python3 /tmp/pr2372_tempo_post.py
           rm -f tests/unit/idempotency-broadcast-evidence-coverage.test.ts
           mapfile -t changed < <(git diff --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
           if ((${#changed[@]})); then pnpm biome check --write "${changed[@]}"; fi
