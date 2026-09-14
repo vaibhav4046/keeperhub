@@ -7,6 +7,7 @@ import {
 import bs58 from "bs58";
 import type { SolanaProviderManager } from "@/lib/rpc/providers/solana";
 import { sleep } from "@/lib/sleep";
+import { OnChainPendingError } from "@/lib/web3/onchain-revert";
 
 function extractFirstSignature(signedBytes: Uint8Array): Uint8Array | null {
   try {
@@ -40,8 +41,7 @@ export function deriveSolanaSignature(signedBytes: Uint8Array): string | null {
 /**
  * Attempts before giving up on a signature that has not surfaced yet. A
  * transaction the RPC accepted needs a slot or two to become queryable, so a
- * single immediate lookup cannot tell "still propagating" from "never landed"
- * and would report a live transaction as failed.
+ * single immediate lookup cannot tell "still propagating" from "never landed".
  */
 export const RECONCILE_ATTEMPTS = 5;
 export const RECONCILE_DELAY_MS = 1500;
@@ -53,12 +53,12 @@ export type ReconcileOptions = {
 };
 
 /**
- * Polls a signature's on-chain status, tolerating the indexing lag that follows
- * a broadcast. Returns true only for a confirmed/finalized transaction with no
- * execution error; an explicit on-chain error short-circuits to false, and an
- * unknown signature stays unknown until the attempts run out.
+ * Polls for the deterministic signature after a send error. Any observed
+ * status is enough to prove that the signed transaction reached the network;
+ * the adapter performs the authoritative confirmation/revert read afterwards.
+ * A missing status remains unknown until all attempts are exhausted.
  */
-async function isSignatureConfirmed(
+async function hasSignatureSurfaced(
   signature: string,
   manager: SolanaProviderManager,
   options: ReconcileOptions
@@ -83,16 +83,7 @@ async function isSignatureConfirmed(
       continue;
     }
 
-    if (!statusResult) {
-      continue;
-    }
-    if (statusResult.err) {
-      return false;
-    }
-    if (
-      statusResult.confirmationStatus === "confirmed" ||
-      statusResult.confirmationStatus === "finalized"
-    ) {
+    if (statusResult) {
       return true;
     }
   }
@@ -118,22 +109,29 @@ export async function submitSignedSolanaTransactionWithFailover(
     );
     return { signature };
   } catch (err) {
-    // On any broadcast error - a duplicate submission (failover resends the
-    // identical signed bytes and Solana dedups by signature) or a timeout where
-    // the RPC accepted the tx but never returned a response - reconcile by
-    // deriving the deterministic signature from the signed bytes and checking
-    // its on-chain status. Only report success for a confirmed/finalized tx
-    // with NO execution error; otherwise rethrow the original error so a
-    // genuinely-failed or never-landed broadcast surfaces to the caller.
-    const firstSig = extractFirstSignature(signedBytes);
-    if (!firstSig) {
+    // The signed bytes already determine the transaction signature before the
+    // network call. Preserve that identity across a lost/ambiguous send reply
+    // exactly as the EVM signed-send helper preserves its deterministic hash.
+    // If the signature has surfaced, return it and let SolanaChainAdapter read
+    // the authoritative confirmation/revert state. If it has not surfaced,
+    // the send outcome is still unknown: throw a structured pending error with
+    // the signature rather than collapsing it into a hashless failure that an
+    // idempotent retry could mistake for "never broadcast".
+    const signature = deriveSolanaSignature(signedBytes);
+    if (!signature) {
       throw err;
     }
-    const signature = bs58.encode(firstSig);
 
-    if (await isSignatureConfirmed(signature, manager, reconcileOptions)) {
+    if (await hasSignatureSurfaced(signature, manager, reconcileOptions)) {
       return { signature };
     }
-    throw err;
+
+    throw new OnChainPendingError({
+      message:
+        err instanceof Error
+          ? `Solana transaction send outcome could not be determined (${err.message})`
+          : `Solana transaction send outcome could not be determined (${String(err)})`,
+      transactionHash: signature,
+    });
   }
 }
