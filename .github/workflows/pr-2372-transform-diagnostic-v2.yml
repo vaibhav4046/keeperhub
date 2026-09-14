@@ -1,0 +1,61 @@
+name: PR 2372 Transform Diagnostic v2
+
+on:
+  push:
+    branches: [automation/pr-2372-hardening]
+    paths: [.github/workflows/pr-2372-transform-diagnostic-v2.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: automation/pr-2372-hardening
+          fetch-depth: 0
+
+      - name: Extract and adapt guarded transformation
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          text = Path('.github/workflows/pr-2372-hardening.yml').read_text()
+          start_marker = "          python3 <<'PY'\n"
+          end_marker = "          PY\n\n      - name: Setup pnpm"
+          start = text.index(start_marker) + len(start_marker)
+          end = text.index(end_marker, start)
+          lines = text[start:end].splitlines()
+          body = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+          old = '''              \'\'\'  if (status === "completed") return "success";\\n  if (status === "unconfirmed") return "failed";\\n  if (\\n    !evidence?.transactionHash &&\\n    (evidence?.broadcastAttempted === true || evidence?.sponsored === true)\\n  ) {\\n    return "failed";\\n  }\\n  return "release";\'\'\','''
+          new = '''              \'\'\'  if (status === "completed") {\\n    return "success";\\n  }\\n  if (status === "unconfirmed") {\\n    return "failed";\\n  }\\n  if (\\n    !evidence?.transactionHash &&\\n    (evidence?.broadcastAttempted === true || evidence?.sponsored === true)\\n  ) {\\n    return "failed";\\n  }\\n  return "release";\'\'\','''
+          if old not in body:
+              raise SystemExit('could not adapt disposition transform source')
+          body = body.replace(old, new, 1)
+          Path('/tmp/pr2372-harden.py').write_text(body)
+          compile(body, '/tmp/pr2372-harden.py', 'exec')
+          PY
+
+      - name: Checkout target
+        run: |
+          git fetch origin fix/issue-1840-release-key-on-definite-failure
+          git checkout -B target origin/fix/issue-1840-release-key-on-definite-failure
+
+      - name: Run transform and persist diagnostic
+        run: |
+          set +e
+          python3 /tmp/pr2372-harden.py > /tmp/transform-v2.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "transform succeeded" > /tmp/transform-v2.log
+          fi
+          git checkout automation/pr-2372-hardening
+          cp /tmp/transform-v2.log .github/pr2372-transform-diagnostic-v2.txt
+          git config user.name "vaibhav4046"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git add .github/pr2372-transform-diagnostic-v2.txt
+          git commit -m "chore: record PR 2372 transform diagnostic v2" || true
+          git push origin automation/pr-2372-hardening
+          exit "$status"
