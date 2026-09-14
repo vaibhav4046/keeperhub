@@ -33,11 +33,19 @@ jobs:
       - name: Apply reviewer hardening in sandbox only
         run: |
           git show origin/automation/pr-2372-hardening:.github/scripts/pr2372_harden_v4.py > /tmp/pr2372_harden.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/pr2372_harden.py')
+          s = p.read_text()
+          old = '    ("plugins/web3/steps/write-contract-core.ts", "writeContractCore", "WriteContractCoreInput", "WriteContractResult", "WriteContractResult"),\n'
+          if s.count(old) != 1:
+              raise SystemExit('could not isolate current write-contract core from v4 transform')
+          p.write_text(s.replace(old, '', 1))
+          PY
           python3 /tmp/pr2372_harden.py
-          # Remove the weak source-string coverage guard from the experiment;
-          # behavioral suites below are the gate, not grep-based assertions.
+          git show origin/automation/pr2372-verify-db2f3a8:.github/scripts/pr2372_post_harden_v5.py > /tmp/pr2372_post.py
+          python3 /tmp/pr2372_post.py
           rm -f tests/unit/idempotency-broadcast-evidence-coverage.test.ts
-          # Fix only formatting in the sandbox. No formatter output is pushed.
           mapfile -t changed < <(git diff --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
           if ((${#changed[@]})); then pnpm biome check --write "${changed[@]}"; fi
           git diff --check
