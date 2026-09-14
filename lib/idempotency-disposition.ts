@@ -5,13 +5,18 @@ export type IdempotencyExecutionEvidence = {
   transactionHash?: string;
   sponsored?: boolean;
   broadcastAttempted?: boolean;
+  rejection?: unknown;
 };
 
 /**
  * Certainty, not success, decides whether a key is released.
- * Direct EVM writes derive their hash before broadcast, so a lost send reply
- * remains hash-bearing. Sponsored providers can additionally say submission
- * was attempted before a hash is available.
+ *
+ * Safety default: a hashless failure with no explicit evidence is ambiguous and
+ * stays held. Definite pre-broadcast failures must carry evidence that nothing
+ * was sent (`broadcastAttempted: false`) or a classified EVM rejection from the
+ * preflight/staticCall path. Once a hash exists, `failed` means receipt
+ * verification reached a conclusive terminal failure; `unconfirmed` always
+ * remains held.
  */
 export function dispositionForExecutionOutcome(
   status: "completed" | "failed" | "unconfirmed",
@@ -23,11 +28,26 @@ export function dispositionForExecutionOutcome(
   if (status === "unconfirmed") {
     return "failed";
   }
-  if (
-    !evidence?.transactionHash &&
-    (evidence?.broadcastAttempted === true || evidence?.sponsored === true)
-  ) {
+  if (evidence?.transactionHash) {
+    return "release";
+  }
+  if (evidence?.broadcastAttempted === true) {
     return "failed";
   }
-  return "release";
+  if (evidence?.broadcastAttempted === false) {
+    return "release";
+  }
+  // A classified EVM revert is evidence that the call was rejected before a
+  // transaction was broadcast. This is the #1840 repro: staticCall rejects a
+  // temporarily-false precondition, so the same logical key must be reusable.
+  if (evidence?.rejection !== undefined) {
+    return "release";
+  }
+  // Sponsored providers may know that submission was attempted before a hash
+  // is available. If they do not provide explicit broadcastAttempted evidence,
+  // fail closed rather than risk a second send.
+  if (evidence?.sponsored === true) {
+    return "failed";
+  }
+  return "failed";
 }
