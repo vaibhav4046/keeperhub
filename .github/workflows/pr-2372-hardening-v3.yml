@@ -1,0 +1,189 @@
+name: PR 2372 Hardening v3
+
+on:
+  push:
+    branches: [automation/pr-2372-hardening]
+    paths: [.github/workflows/pr-2372-hardening-v3.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout automation branch
+        uses: actions/checkout@v4
+        with:
+          ref: automation/pr-2372-hardening
+          fetch-depth: 0
+
+      - name: Build guarded transformation
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          text = Path('.github/workflows/pr-2372-hardening.yml').read_text()
+          start_marker = "          python3 <<'PY'\n"
+          end_marker = "          PY\n\n      - name: Setup pnpm"
+          start = text.index(start_marker) + len(start_marker)
+          end = text.index(end_marker, start)
+          lines = text[start:end].splitlines()
+          body = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+          marker = 'def add_import(path, statement):\n'
+          if marker not in body:
+              raise SystemExit('replace_once injection point missing')
+          fallback = r'''_strict_replace_once = replace_once
+
+def replace_once(path, old, new):
+    text = load(path)
+    count = text.count(old)
+    if count == 1:
+        save(path, text.replace(old, new, 1))
+        return
+    if path == "lib/idempotency-disposition.ts" and count == 0:
+        pattern = re.compile(
+            r'  if \(status === "completed"\) \{\n'
+            r'    return "success";\n'
+            r'  \}\n'
+            r'  if \(status === "unconfirmed"\) \{\n'
+            r'    return "failed";\n'
+            r'  \}\n'
+            r'  if \(\n'
+            r'    !evidence\?\.transactionHash &&\n'
+            r'    \(evidence\?\.broadcastAttempted === true \|\| evidence\?\.sponsored === true\)\n'
+            r'  \) \{\n'
+            r'    return "failed";\n'
+            r'  \}\n'
+            r'  return "release";'
+        )
+        matches = list(pattern.finditer(text))
+        if len(matches) != 1:
+            raise SystemExit(f"{path}: structural disposition match count={len(matches)}")
+        save(path, pattern.sub(new, text, count=1))
+        return
+    raise SystemExit(f"{path}: expected 1 exact match, found {count}: {old[:120]!r}")
+
+'''
+          body = body.replace(marker, fallback + marker, 1)
+          Path('/tmp/pr2372-harden.py').write_text(body)
+          compile(body, '/tmp/pr2372-harden.py', 'exec')
+          PY
+
+      - name: Checkout verified target base
+        run: |
+          set -euo pipefail
+          git config user.name "vaibhav4046"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git fetch origin fix/issue-1840-release-key-on-definite-failure
+          git checkout -B fix/issue-1840-release-key-on-definite-failure origin/fix/issue-1840-release-key-on-definite-failure
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git || true
+          git fetch upstream staging
+          test "$(git rev-parse HEAD^)" = "$(git rev-parse upstream/staging)"
+
+      - name: Apply broadcast-evidence hardening
+        run: |
+          set -o pipefail
+          python3 /tmp/pr2372-harden.py 2>&1 | tee /tmp/pr2372-verify.log
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee -a /tmp/pr2372-verify.log
+
+      - name: Format changed source
+        run: |
+          set -o pipefail
+          pnpm exec biome check --write \
+            lib/idempotency-disposition.ts \
+            lib/web3/submit-signed.ts \
+            app/api/execute/transfer/route.ts \
+            plugins/web3/steps/transfer-funds-core.ts \
+            plugins/web3/steps/transfer-token-core.ts \
+            plugins/web3/steps/write-contract-core.ts \
+            plugins/web3/steps/approve-token-core.ts \
+            plugins/web3/steps/batch-write-contract-core.ts \
+            plugins/web3/steps/transfer-spl-token-core.ts \
+            plugins/robinhood/steps/trade-stock-token-core.ts \
+            plugins/tempo/steps/tempo-tx-core.ts \
+            plugins/tempo/steps/transfer-with-memo.ts \
+            plugins/tempo/steps/dex-swap.ts \
+            plugins/tempo/steps/batch-payout.ts \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/unit/idempotency-broadcast-evidence-coverage.test.ts 2>&1 | tee -a /tmp/pr2372-verify.log
+
+      - name: Focused safety tests
+        run: |
+          set -o pipefail
+          pnpm vitest run \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/unit/idempotency-broadcast-evidence-coverage.test.ts \
+            tests/unit/submit-signed-failover.test.ts \
+            tests/unit/tempo-transfer-with-memo.test.ts \
+            tests/unit/tempo-dex-swap.test.ts \
+            tests/unit/tempo-batch-payout.test.ts 2>&1 | tee -a /tmp/pr2372-verify.log
+
+      - name: Existing issue 1840 tests
+        run: |
+          set -o pipefail
+          pnpm vitest run \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/idempotency.test.ts \
+            tests/unit/submit-signed.test.ts 2>&1 | tee -a /tmp/pr2372-verify.log
+
+      - name: Typecheck
+        run: |
+          set -o pipefail
+          pnpm type-check 2>&1 | tee -a /tmp/pr2372-verify.log
+
+      - name: API docs validation
+        run: |
+          set -o pipefail
+          pnpm check:api-docs 2>&1 | tee -a /tmp/pr2372-verify.log
+
+      - name: Full Biome check
+        run: |
+          set -o pipefail
+          pnpm check 2>&1 | tee -a /tmp/pr2372-verify.log
+
+      - name: Verify diff and commit
+        run: |
+          set -euo pipefail
+          git diff --check 2>&1 | tee -a /tmp/pr2372-verify.log
+          git diff --stat upstream/staging | tee -a /tmp/pr2372-verify.log
+          if git diff upstream/staging -- .github/workflows | grep -q .; then
+            echo "unexpected workflow diff on target branch" | tee -a /tmp/pr2372-verify.log
+            exit 1
+          fi
+          git reset --soft upstream/staging
+          git add -A
+          git commit -m "fix: harden #1840 broadcast evidence"
+
+      - name: Push verified target branch
+        run: git push --force-with-lease origin HEAD:fix/issue-1840-release-key-on-definite-failure
+
+      - name: Persist verifier failure
+        if: failure()
+        run: |
+          set +e
+          cp /tmp/pr2372-verify.log /tmp/failure.log 2>/dev/null || echo "failure occurred before verifier log was created" > /tmp/failure.log
+          git reset --hard
+          git checkout automation/pr-2372-hardening
+          cp /tmp/failure.log .github/pr2372-v3-failure.txt
+          git config user.name "vaibhav4046"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git add .github/pr2372-v3-failure.txt
+          git commit -m "chore: record PR 2372 v3 verifier failure" || true
+          git push origin automation/pr-2372-hardening
