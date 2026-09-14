@@ -56,12 +56,33 @@ jobs:
           rm -f tests/unit/idempotency-broadcast-evidence-coverage.test.ts
           python3 - <<'PY'
           from pathlib import Path
+
           p = Path('tests/unit/execute-protocol-idempotency-disposition.test.ts')
           s = p.read_text()
           duplicate = '      broadcastAttempted: false,\n      broadcastAttempted: false,\n'
           if s.count(duplicate) != 4:
               raise SystemExit(f'expected 4 duplicate sandbox fixture fields, found {s.count(duplicate)}')
           p.write_text(s.replace(duplicate, '      broadcastAttempted: false,\n'), newline='\n')
+
+          p = Path('plugins/web3/steps/transfer-spl-token-core.ts')
+          s = p.read_text()
+          malformed = '| { success: false; error: string     broadcastAttempted?: boolean;\n    };'
+          if s.count(malformed) != 1:
+              raise SystemExit(f'expected malformed SPL arm once, found {s.count(malformed)}')
+          p.write_text(s.replace(malformed, '''| {\n      success: false;\n      error: string;\n      broadcastAttempted?: boolean;\n    };'''), newline='\n')
+
+          p = Path('tests/unit/idempotency.test.ts')
+          s = p.read_text()
+          old = '    expect(dispositionForExecutionOutcome("failed")).toBe("release");'
+          new = '''    expect(\n      dispositionForExecutionOutcome("failed", { broadcastAttempted: false })\n    ).toBe("release");'''
+          if s.count(old) != 1:
+              raise SystemExit('definite-failure assertion not found once')
+          s = s.replace(old, new, 1)
+          old = '''    const seen = (["completed", "failed", "unconfirmed"] as const).map(\n      (status) => dispositionForExecutionOutcome(status)\n    );\n    expect(new Set(seen).size).toBe(3);'''
+          new = '''    const seen = [\n      dispositionForExecutionOutcome("completed"),\n      dispositionForExecutionOutcome("failed", { broadcastAttempted: false }),\n      dispositionForExecutionOutcome("unconfirmed"),\n    ];\n    expect(new Set(seen).size).toBe(3);'''
+          if s.count(old) != 1:
+              raise SystemExit('three-disposition assertion not found once')
+          p.write_text(s.replace(old, new, 1), newline='\n')
           PY
           mapfile -t changed < <(git diff --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
           if ((${#changed[@]})); then pnpm biome check --write "${changed[@]}"; fi
