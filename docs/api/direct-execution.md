@@ -156,9 +156,43 @@ the request was received, so a retry must be able to match the original. Reusing
 key is what makes that retry safe: it returns the in-progress guard while the first
 request is still running, and the real outcome as a replay once it finishes.
 
-**Rotate to a new key** once the previous attempt returned a definite result. A
-stored failure is replayable for 24 hours, so a key that has already failed keeps
-returning that failure rather than retrying.
+**Reuse the same key after a failure the chain was conclusive about.** A
+transaction that reached the chain and reverted at inclusion releases the key:
+it landed, the chain gave a verdict, and nothing is still in flight. The same
+key simply executes again, so you no longer have to rotate to recover from that
+attempt.
+
+The send boundary preserves evidence instead of making the route guess from a
+missing RPC reply. Directly signed EVM transactions have a deterministic hash
+before broadcast, so an ambiguous send keeps that hash and is held/reconciled.
+A sponsored provider can report that submission was attempted before exposing a
+hash; that explicit evidence is held too. With neither form of send evidence, a
+write-core failure is pre-broadcast and the key is released.
+
+Two consequences worth stating plainly, because they decide what your retry
+should do:
+
+- A write-core pre-broadcast rejection (for example `staticCall` or an in-core
+  balance check) is **released**. Validation 4xx responses also release, while
+  `simulate: true` reserves no idempotency record at all.
+- The mixed-chain `/api/execute/transfer` route keeps a hashless Solana failure
+  **held**. This PR's send-boundary evidence change is EVM-specific; treating a
+  Solana no-hash result as definite would widen #1840 into an unrelated
+  duplicate-send risk.
+- A Safe transaction whose outer `execTransaction` mined while the inner call
+  reverted is **held**. The Safe's nonce and the owner signatures for it were
+  consumed, so "nothing landed" is not true even though the intended work did
+  not happen.
+
+**An outcome nobody could read keeps its key.** If the receipt was unreadable
+the transaction may still land, so that record is held and replays for 24 hours.
+The reply carries `"status": "unconfirmed"` and `"idempotentReplay": true`. Poll
+`GET /api/execute/{executionId}/status` rather than rotating, because a new key
+has no record to match and would broadcast a second transaction for work the
+first attempt may still be completing.
+
+**Rotate to a new key** when the work itself is different, not to escape a
+failure.
 
 **A conflict does not by itself mean rotate.** `retryable: false` says only that
 this body is not the body the key was bound to, and there are two reasons for
