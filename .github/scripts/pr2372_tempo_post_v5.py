@@ -9,14 +9,6 @@ def write(path: str, text: str) -> None:
     Path(path).write_text(text, encoding="utf-8", newline="\n")
 
 
-def exact(path: str, old: str, new: str, count: int = 1) -> None:
-    text = read(path)
-    found = text.count(old)
-    if found != count:
-        raise SystemExit(f"{path}: expected {count}, found {found}: {old[:100]!r}")
-    write(path, text.replace(old, new, count))
-
-
 def add_import(path: str) -> None:
     text = read(path)
     statement = 'import { broadcastTransactionHash } from "@/lib/web3/onchain-revert";'
@@ -61,13 +53,11 @@ def patch_action(path: str, input_t: str, result_t: str) -> None:
         1,
     )
     catch_marker = '''    return { success: false, error: getErrorMessage(error) };'''
-    if text.count(catch_marker) != 1:
-        raise SystemExit(f"{path}: terminal catch count={text.count(catch_marker)}")
-    text = text.replace(
-        catch_marker,
-        '''    const transactionHash = broadcastHash ?? broadcastTransactionHash(error);\n    return {\n      success: false,\n      error: getErrorMessage(error),\n      broadcastAttempted: transactionHash ? true : false,\n      ...(transactionHash ? { transactionHash, chainId } : {}),\n    };''',
-        1,
-    )
+    pos = text.rfind(catch_marker)
+    if pos < 0:
+        raise SystemExit(f"{path}: terminal catch missing")
+    catch_new = '''    const transactionHash = broadcastHash ?? broadcastTransactionHash(error);\n    return {\n      success: false,\n      error: getErrorMessage(error),\n      broadcastAttempted: transactionHash ? true : false,\n      ...(transactionHash ? { transactionHash, chainId } : {}),\n    };'''
+    text = text[:pos] + catch_new + text[pos + len(catch_marker):]
     export_pos = text.find("\nexport async function ")
     if export_pos < 0:
         raise SystemExit(f"{path}: exported step marker missing")
