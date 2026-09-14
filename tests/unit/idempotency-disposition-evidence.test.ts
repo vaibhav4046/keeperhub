@@ -20,6 +20,15 @@ describe("idempotency execution evidence", () => {
     ).toBe("release");
   });
 
+  it("holds when broadcast evidence conflicts with a decoded rejection", () => {
+    expect(
+      dispositionForExecutionOutcome("failed", {
+        broadcastAttempted: true,
+        rejection: { kind: "string-revert", reason: "late provider error" },
+      })
+    ).toBe("failed");
+  });
+
   it("holds a hashless failure once broadcast was attempted", () => {
     expect(
       dispositionForExecutionOutcome("failed", { broadcastAttempted: true })
