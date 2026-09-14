@@ -54,6 +54,15 @@ jobs:
           git show origin/automation/pr2372-verify-db2f3a8:.github/scripts/pr2372_tempo_post_v5.py > /tmp/pr2372_tempo_post.py
           python3 /tmp/pr2372_tempo_post.py
           rm -f tests/unit/idempotency-broadcast-evidence-coverage.test.ts
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/unit/execute-protocol-idempotency-disposition.test.ts')
+          s = p.read_text()
+          duplicate = '      broadcastAttempted: false,\n      broadcastAttempted: false,\n'
+          if s.count(duplicate) != 4:
+              raise SystemExit(f'expected 4 duplicate sandbox fixture fields, found {s.count(duplicate)}')
+          p.write_text(s.replace(duplicate, '      broadcastAttempted: false,\n'), newline='\n')
+          PY
           mapfile -t changed < <(git diff --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
           if ((${#changed[@]})); then pnpm biome check --write "${changed[@]}"; fi
           git diff --check
