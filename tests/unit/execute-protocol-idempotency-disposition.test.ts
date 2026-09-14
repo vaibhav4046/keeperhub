@@ -430,6 +430,7 @@ describe("execute protocol idempotency disposition", () => {
     writeContractCoreMock.mockResolvedValue({
       success: false,
       error: "LK: not yet due",
+      broadcastAttempted: false,
     });
     failExecutionMock.mockResolvedValue({ status: "failed" });
 
@@ -462,6 +463,7 @@ describe("execute transfer idempotency disposition", () => {
     transferFundsCoreMock.mockResolvedValue({
       success: false,
       error: "LK: not yet due",
+      broadcastAttempted: false,
     });
     failExecutionMock.mockResolvedValue({ status: "failed" });
 
@@ -526,6 +528,7 @@ describe("execute contract-call idempotency disposition", () => {
     writeContractCoreMock.mockResolvedValue({
       success: false,
       error: "LK: not yet due",
+      broadcastAttempted: false,
     });
     failExecutionMock.mockResolvedValue({ status: "failed" });
 
@@ -577,6 +580,7 @@ describe("execute check-and-execute idempotency disposition", () => {
     writeContractCoreMock.mockResolvedValue({
       success: false,
       error: "LK: not yet due",
+      broadcastAttempted: false,
     });
     failExecutionMock.mockResolvedValue({ status: "failed" });
 
