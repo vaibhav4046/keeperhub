@@ -6,6 +6,7 @@
  * exporting functions from "use step" files (which breaks the workflow bundler).
  */
 import "server-only";
+import { isDefinitelyPreBroadcastNetworkError } from "@/lib/web3/submit-signed";
 import { ExecutionErrorType } from "@/lib/errors/execution-error-type";
 
 import { eq } from "drizzle-orm";
@@ -217,7 +218,7 @@ export function applyFailOnError(
  * Shared between the web3 write-contract step and the future protocol-write step.
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Contract interaction requires extensive validation
-export async function writeContractCore(
+async function writeContractCoreImpl(
   input: WriteContractCoreInput
 ): Promise<WriteContractResult> {
   const {
@@ -658,6 +659,7 @@ export async function writeContractCore(
       // Non-critical -- error formatting will fall back to generic messages
     }
 
+    let receivedTransactionHash: string | undefined;
     try {
       let receipt: Awaited<ReturnType<typeof adapter.executeContractCall>>;
       if (signerMode.kind === SIGNER_MODE.SAFE_ROLE) {
@@ -723,6 +725,7 @@ export async function writeContractCore(
         );
       }
 
+      receivedTransactionHash = receipt.hash;
       const gasUsedUnits = receipt.gasUsed.toString();
       const effectiveGasPrice = receipt.effectiveGasPrice.toString();
       const gasCostWei = (receipt.gasUsed * receipt.effectiveGasPrice).toString();
@@ -757,7 +760,8 @@ export async function writeContractCore(
         }
       );
       const rejection = classifyRevert(error, contractInterface);
-      const broadcastHash = broadcastTransactionHash(error);
+      const broadcastHash =
+        broadcastTransactionHash(error) ?? receivedTransactionHash;
       let broadcastTransactionLink: string | undefined;
       if (broadcastHash) {
         try {
@@ -777,6 +781,12 @@ export async function writeContractCore(
         success: false,
         error: formatContractError(error, contractInterface),
         ...(errorClass ? { errorClass } : {}),
+        broadcastAttempted: broadcastHash
+          ? true
+          : rejection.kind !== "unknown" ||
+              isDefinitelyPreBroadcastNetworkError(error)
+            ? false
+            : true,
         ...(rejection.kind !== "unknown" ? { rejection } : {}),
         ...(broadcastHash
           ? {
@@ -790,4 +800,15 @@ export async function writeContractCore(
       };
     }
   });
+}
+
+/** Explicitly marks every hashless early return as pre-broadcast evidence. */
+export async function writeContractCore(
+  input: WriteContractCoreInput
+): Promise<WriteContractResult> {
+  const result = await writeContractCoreImpl(input);
+  if (result.success || result.broadcastAttempted !== undefined) {
+    return result;
+  }
+  return { ...result, broadcastAttempted: false };
 }

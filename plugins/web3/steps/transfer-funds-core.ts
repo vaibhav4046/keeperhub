@@ -6,6 +6,7 @@
  * exporting functions from "use step" files (which breaks the workflow bundler).
  */
 import "server-only";
+import { isDefinitelyPreBroadcastNetworkError } from "@/lib/web3/submit-signed";
 
 import { eq } from "drizzle-orm";
 import { ethers } from "ethers";
@@ -131,7 +132,7 @@ export type TransferFundsResult =
  * When _context.organizationId is provided, skips workflowExecutions lookup.
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Transfer handler with sponsorship attempt + fallback + validation
-export async function transferFundsCore(
+async function transferFundsCoreImpl(
   input: TransferFundsCoreInput
 ): Promise<TransferFundsResult> {
   const {
@@ -438,6 +439,7 @@ export async function transferFundsCore(
       };
     }
 
+    let receivedTransactionHash: string | undefined;
     try {
       let receipt: Awaited<ReturnType<typeof adapter.sendTransaction>>;
       if (signerMode.kind === SIGNER_MODE.SAFE_ROLE) {
@@ -490,6 +492,7 @@ export async function transferFundsCore(
         );
       }
 
+      receivedTransactionHash = receipt.hash;
       const gasUsedUnits = receipt.gasUsed.toString();
       const effectiveGasPrice = receipt.effectiveGasPrice.toString();
       const gasCostWei = (receipt.gasUsed * receipt.effectiveGasPrice).toString();
@@ -516,6 +519,8 @@ export async function transferFundsCore(
         }
       );
       const rejection = classifyRevert(error);
+      const broadcastHash =
+        broadcastTransactionHash(error) ?? receivedTransactionHash;
       // Attributed as a system fault so the execution log records a fault
       // domain for it; a relay-determined class is more specific, so it wins.
       const errorClass =
@@ -526,9 +531,13 @@ export async function transferFundsCore(
         error: formatContractError(error, undefined, "Transaction failed"),
         ...(errorClass ? { errorClass } : {}),
         ...(rejection.kind !== "unknown" ? { rejection } : {}),
-        ...(broadcastTransactionHash(error)
-          ? { transactionHash: broadcastTransactionHash(error), chainId }
-          : {}),
+        broadcastAttempted:
+          broadcastHash ? true
+            : rejection.kind !== "unknown" ||
+                isDefinitelyPreBroadcastNetworkError(error)
+              ? false
+              : true,
+        ...(broadcastHash ? { transactionHash: broadcastHash, chainId } : {}),
       };
     }
   });
@@ -689,6 +698,17 @@ async function transferFundsSolana(args: {
     return {
       success: false,
       error: getErrorMessage(error),
+      broadcastAttempted: true,
     };
   }
+}
+
+export async function transferFundsCore(
+  input: TransferFundsCoreInput
+): Promise<TransferFundsResult> {
+  const result = await transferFundsCoreImpl(input);
+  if (result.success || result.broadcastAttempted !== undefined) {
+    return result;
+  }
+  return { ...result, broadcastAttempted: false };
 }
