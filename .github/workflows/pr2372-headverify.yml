@@ -1,0 +1,59 @@
+name: PR 2372 current head verification
+
+on:
+  push:
+    branches:
+      - automation/pr2372-headverify-f88c
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Generate plugin registry
+        run: pnpm discover-plugins
+      - name: Focused safety tests
+        run: >-
+          pnpm vitest run
+          tests/unit/idempotency-disposition-evidence.test.ts
+          tests/unit/execute-protocol-idempotency-disposition.test.ts
+          tests/unit/execution-service-safe-inner-failure.test.ts
+          tests/unit/idempotency.test.ts
+          tests/unit/submit-signed.test.ts
+          tests/unit/write-contract-core.test.ts
+          tests/unit/approve-token.test.ts
+          tests/unit/batch-write-contract.test.ts
+          tests/unit/robinhood-trade-stock-token.test.ts
+          tests/unit/transfer-spl-token.test.ts
+          tests/unit/transfer-token-core.test.ts
+          tests/unit/tempo-dex-swap.test.ts
+          tests/unit/tempo-batch-payout.test.ts
+          tests/unit/tempo-transfer-with-memo.test.ts
+      - name: Type check
+        run: pnpm type-check
+      - name: Biome changed source set
+        shell: bash
+        run: |
+          git fetch origin staging || true
+          mapfile -t changed < <(git diff --name-only origin/staging...HEAD --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
+          pnpm biome check "${changed[@]}"
+      - name: API docs validation
+        run: pnpm check:api-docs
+      - name: Diff safety
+        run: |
+          git diff --check origin/staging...HEAD
+          test -z "$(git diff --name-only origin/staging...HEAD | grep '^\.github/workflows/' || true)" || {
+            echo 'PR branch unexpectedly contains workflow changes'; exit 1;
+          }
