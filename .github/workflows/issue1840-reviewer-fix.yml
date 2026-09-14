@@ -7,6 +7,7 @@ on:
     paths:
       - scripts/issue1840_reviewer_fix.py
       - scripts/issue1840_test_patch.py
+      - scripts/issue1840_patch_script_fix.py
       - .github/workflows/issue1840-reviewer-fix.yml
 
 permissions:
@@ -24,6 +25,7 @@ jobs:
 
       - name: Apply exact reviewer patch
         run: |
+          python3 scripts/issue1840_patch_script_fix.py
           python3 scripts/issue1840_reviewer_fix.py
           python3 scripts/issue1840_test_patch.py
 
@@ -78,6 +80,7 @@ jobs:
         run: |
           rm scripts/issue1840_reviewer_fix.py
           rm scripts/issue1840_test_patch.py
+          rm scripts/issue1840_patch_script_fix.py
           rm .github/workflows/issue1840-reviewer-fix.yml
 
       - name: Commit verified patch
