@@ -1,0 +1,126 @@
+name: PR 2372 final contributor verification
+
+on:
+  push:
+    branches:
+      - automation/pr2372-finalverify-f88cba6
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f88cba617f239b8c396eb91f5ed385518242feb5
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Fetch staging
+        run: git fetch https://github.com/KeeperHub/keeperhub.git staging:refs/remotes/upstream/staging
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Generate plugin registry
+        run: pnpm discover-plugins
+      - name: Reviewer safety regression matrix
+        run: >-
+          pnpm vitest run
+          tests/unit/idempotency-disposition-evidence.test.ts
+          tests/unit/execute-protocol-idempotency-disposition.test.ts
+          tests/unit/execution-service-safe-inner-failure.test.ts
+          tests/unit/idempotency.test.ts
+          tests/unit/submit-signed.test.ts
+          tests/unit/write-contract-core.test.ts
+          tests/unit/approve-token.test.ts
+          tests/unit/batch-write-contract.test.ts
+          tests/unit/robinhood-trade-stock-token.test.ts
+          tests/unit/transfer-spl-token.test.ts
+          tests/unit/transfer-token-core.test.ts
+          tests/unit/tempo-dex-swap.test.ts
+          tests/unit/tempo-batch-payout.test.ts
+          tests/unit/tempo-transfer-with-memo.test.ts
+      - name: Type check
+        run: pnpm type-check
+      - name: Biome changed source set
+        shell: bash
+        run: |
+          mapfile -t changed < <(git diff --name-only upstream/staging...HEAD --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
+          if (( ${#changed[@]} )); then
+            pnpm biome check "${changed[@]}"
+          fi
+      - name: API docs validation
+        run: pnpm check:api-docs
+      - name: Diff safety
+        run: |
+          git diff --check upstream/staging...HEAD
+          test -z "$(git status --porcelain)"
+      - name: Full unit candidate
+        id: candidate
+        shell: bash
+        run: |
+          set +e
+          pnpm vitest run tests/unit --reporter=json --outputFile=/tmp/candidate.json
+          status=$?
+          set -e
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.load(open('/tmp/candidate.json'))
+          files=[]
+          for r in d.get('testResults', []):
+              failed = r.get('status') == 'failed' or any(a.get('status') == 'failed' for a in r.get('assertionResults', []))
+              if failed:
+                  files.append(r.get('name','<unknown>'))
+          files=sorted(set(files))
+          Path('/tmp/candidate-failed-files.txt').write_text('\n'.join(files) + ('\n' if files else ''))
+          print('candidate failed files:', len(files))
+          for f in files: print('CANDIDATE_FAIL', f)
+          PY
+      - name: Full unit staging baseline
+        id: baseline
+        shell: bash
+        run: |
+          git switch --detach upstream/staging
+          pnpm discover-plugins
+          set +e
+          pnpm vitest run tests/unit --reporter=json --outputFile=/tmp/baseline.json
+          status=$?
+          set -e
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.load(open('/tmp/baseline.json'))
+          files=[]
+          for r in d.get('testResults', []):
+              failed = r.get('status') == 'failed' or any(a.get('status') == 'failed' for a in r.get('assertionResults', []))
+              if failed:
+                  files.append(r.get('name','<unknown>'))
+          files=sorted(set(files))
+          Path('/tmp/baseline-failed-files.txt').write_text('\n'.join(files) + ('\n' if files else ''))
+          print('baseline failed files:', len(files))
+          for f in files: print('BASELINE_FAIL', f)
+          PY
+      - name: Require zero new full-suite failing files
+        shell: bash
+        run: |
+          echo '--- staging baseline failures ---'
+          cat /tmp/baseline-failed-files.txt || true
+          echo '--- candidate failures ---'
+          cat /tmp/candidate-failed-files.txt || true
+          new_failures=$(comm -13 /tmp/baseline-failed-files.txt /tmp/candidate-failed-files.txt || true)
+          if [[ -n "$new_failures" ]]; then
+            echo 'PR introduces new failing unit files:'
+            echo "$new_failures"
+            exit 1
+          fi
+          echo 'No new full-suite failing unit files relative to current staging.'
