@@ -552,7 +552,9 @@ describe("dispositionForExecutionOutcome", () => {
     const { dispositionForExecutionOutcome } = await import(
       "@/lib/idempotency"
     );
-    expect(dispositionForExecutionOutcome("failed")).toBe("release");
+    expect(
+      dispositionForExecutionOutcome("failed", { broadcastAttempted: false })
+    ).toBe("release");
   });
 
   it("holds the key while the outcome is unknown", async () => {
@@ -568,9 +570,11 @@ describe("dispositionForExecutionOutcome", () => {
     const { dispositionForExecutionOutcome } = await import(
       "@/lib/idempotency"
     );
-    const seen = (["completed", "failed", "unconfirmed"] as const).map(
-      (status) => dispositionForExecutionOutcome(status)
-    );
+    const seen = [
+      dispositionForExecutionOutcome("completed"),
+      dispositionForExecutionOutcome("failed", { broadcastAttempted: false }),
+      dispositionForExecutionOutcome("unconfirmed"),
+    ];
     expect(new Set(seen).size).toBe(3);
   });
 });

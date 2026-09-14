@@ -127,7 +127,7 @@ function pendingBroadcast(
 
 const RPC_FAILOVER_ENDPOINT_SPLIT = /\b(?:primary|fallback):\s*/i;
 
-function isDefinitelyPreBroadcastNetworkError(error: unknown): boolean {
+export function isDefinitelyPreBroadcastNetworkError(error: unknown): boolean {
   const message = errorMessage(error).toLowerCase();
   const endpointFailures = message
     .split(RPC_FAILOVER_ENDPOINT_SPLIT)

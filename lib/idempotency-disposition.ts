@@ -23,11 +23,14 @@ export function dispositionForExecutionOutcome(
   if (status === "unconfirmed") {
     return "failed";
   }
-  if (
-    !evidence?.transactionHash &&
-    (evidence?.broadcastAttempted === true || evidence?.sponsored === true)
-  ) {
+  if (evidence?.transactionHash) {
+    return "release";
+  }
+  if (evidence?.sponsored === true) {
     return "failed";
   }
-  return "release";
+  if (evidence?.broadcastAttempted === false) {
+    return "release";
+  }
+  return "failed";
 }

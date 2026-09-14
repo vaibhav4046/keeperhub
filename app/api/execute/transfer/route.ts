@@ -342,10 +342,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       : {}),
     ...(outcome.error ? { error: outcome.error } : {}),
   };
-  const disposition =
-    isSolanaTransfer && !result.transactionHash
-      ? "failed"
-      : dispositionForExecutionOutcome(outcome.status, result);
+  const disposition = dispositionForExecutionOutcome(outcome.status, result);
   return applyRateLimitHeaders(
     await recordIdempotentResponse(
       idem,
