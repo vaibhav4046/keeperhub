@@ -11,6 +11,7 @@ import {
 } from "@/lib/execute/simulate";
 import {
   beginIdempotentFromRequest,
+  dispositionForExecutionOutcome,
   idempotencyEarlyResponse,
   recordIdempotentResponse,
   withIdempotencyHeartbeat,
@@ -319,6 +320,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       transactionHash: result.transactionHash,
       chainId: result.chainId,
       sponsored: result.sponsored,
+      broadcastAttempted: result.broadcastAttempted,
     });
     outcome = { status: settled.status, error: result.error };
   }
@@ -340,11 +342,15 @@ export async function POST(request: Request): Promise<NextResponse> {
       : {}),
     ...(outcome.error ? { error: outcome.error } : {}),
   };
+  const disposition =
+    isSolanaTransfer && !result.transactionHash
+      ? "failed"
+      : dispositionForExecutionOutcome(outcome.status, result);
   return applyRateLimitHeaders(
     await recordIdempotentResponse(
       idem,
       NextResponse.json(responseBody, { status: HttpStatus.ACCEPTED }),
-      outcome.status === "completed" ? "success" : "failed"
+      disposition
     ),
     rateLimit
   );
