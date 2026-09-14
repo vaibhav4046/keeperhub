@@ -1,4 +1,4 @@
-name: PR 2372 hardening sandbox
+name: PR 2372 final hardening verification
 
 on:
   push:
@@ -6,12 +6,12 @@ on:
       - automation/pr2372-verify-db2f3a8
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Apply reviewer hardening in sandbox only
+      - name: Apply verified hardening to exact PR HEAD
         run: |
           git show origin/automation/pr-2372-hardening:.github/scripts/pr2372_harden_v4.py > /tmp/pr2372_harden.py
           python3 - <<'PY'
@@ -95,11 +95,35 @@ jobs:
           if s.count(old) != 1:
               raise SystemExit('three-disposition assertion not found once')
           p.write_text(s.replace(old, new, 1), newline='\n')
+
+          # Regression: once a receipt exists, later explorer/trace decoration
+          # failures must retain the transaction hash and attempted evidence.
+          p = Path('tests/unit/write-contract-core.test.ts')
+          s = p.read_text()
+          marker = '''  it("leaves an ordinary send failure unclassified and softenable", async () => {\n    mockExecuteContractCall.mockRejectedValueOnce(new Error("nonce too low"));\n\n    const result = await writeContractCore({\n      contractAddress: "0x1234567890123456789012345678901234567890",\n      network: "ethereum",\n      abi: VALID_ABI,\n      abiFunction: "transfer",\n      _context: { organizationId: "org-1" },\n    });\n\n    expect(result.success).toBe(false);\n    if (!result.success) {\n      expect(result.errorClass).toBeUndefined();\n    }\n    expect(applyFailOnError(result, false).success).toBe(true);\n  });\n'''
+          addition = marker + '''\n  it("retains the receipt hash when post-broadcast explorer decoration fails", async () => {\n    mockGetTransactionUrl.mockRejectedValueOnce(\n      new Error("explorer lookup unavailable")\n    );\n\n    const result = await writeContractCore({\n      contractAddress: "0x1234567890123456789012345678901234567890",\n      network: "ethereum",\n      abi: VALID_ABI,\n      abiFunction: "transfer",\n      _context: { organizationId: "org-1" },\n    });\n\n    expect(result.success).toBe(false);\n    if (!result.success) {\n      expect(result.transactionHash).toBe("0xhash");\n      expect(result.broadcastAttempted).toBe(true);\n    }\n  });\n'''
+          if s.count(marker) != 1:
+              raise SystemExit('write-contract post-broadcast insertion marker not found once')
+          p.write_text(s.replace(marker, addition, 1), newline='\n')
+
+          # Keep the retry docs truthful without shifting downstream line-based
+          # API coverage metadata: both replacements preserve line counts.
+          p = Path('docs/api/direct-execution.md')
+          s = p.read_text()
+          old = '''The send boundary preserves evidence instead of making the route guess from a\nmissing RPC reply. Directly signed EVM transactions have a deterministic hash\nbefore broadcast, so an ambiguous send keeps that hash and is held/reconciled.\nA sponsored provider can report that submission was attempted before exposing a\nhash; that explicit evidence is held too. With neither form of send evidence, a\nwrite-core failure is pre-broadcast and the key is released.'''
+          new = '''The send boundary preserves evidence instead of making the route guess from a\nmissing RPC reply. Directly signed EVM transactions retain a deterministic hash\nonce submission may have begun. Every broadcasting core also reports its boundary:\n`broadcastAttempted: false` means it proved the attempt stopped before submission;\n`true` means submission may have started. Missing evidence fails closed and keeps\nthe key rather than treating a missing hash as proof that nothing was broadcast.'''
+          if s.count(old) != 1:
+              raise SystemExit('docs evidence paragraph not found once')
+          s = s.replace(old, new, 1)
+          old = '''- The mixed-chain `/api/execute/transfer` route keeps a hashless Solana failure\n  **held**. This PR's send-boundary evidence change is EVM-specific; treating a\n  Solana no-hash result as definite would widen #1840 into an unrelated\n  duplicate-send risk.'''
+          new = '''- The mixed-chain `/api/execute/transfer` route keeps a hashless Solana failure\n  **held**. Solana send failures report attempted evidence where known, and any\n  missing evidence fails closed; absence of a signature is never treated as\n  proof that nothing reached the network.'''
+          if s.count(old) != 1:
+              raise SystemExit('docs Solana paragraph not found once')
+          p.write_text(s.replace(old, new, 1), newline='\n')
           PY
           mapfile -t changed < <(git diff --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
           if ((${#changed[@]})); then pnpm biome check --write "${changed[@]}"; fi
           git diff --check
-          git diff --stat
 
       - name: Generate plugin registry
         run: pnpm discover-plugins
@@ -112,6 +136,7 @@ jobs:
           tests/unit/execution-service-safe-inner-failure.test.ts
           tests/unit/idempotency.test.ts
           tests/unit/submit-signed.test.ts
+          tests/unit/write-contract-core.test.ts
           tests/unit/approve-token.test.ts
           tests/unit/batch-write-contract.test.ts
           tests/unit/robinhood-trade-stock-token.test.ts
@@ -124,7 +149,7 @@ jobs:
       - name: Type check
         run: pnpm type-check
 
-      - name: Biome hardening diff
+      - name: Biome final diff
         run: |
           mapfile -t changed < <(git diff --name-only --diff-filter=ACMR | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
           if ((${#changed[@]})); then pnpm biome check "${changed[@]}"; fi
@@ -135,5 +160,19 @@ jobs:
       - name: Final diff safety
         run: |
           git diff --check
-          git status --short
+          if git diff --name-only | grep -Eq '^(\.github/|scripts/)|idempotency-broadcast-evidence-coverage'; then
+            echo 'temporary verification machinery leaked into result' >&2
+            exit 1
+          fi
           git diff --name-only
+          git diff --stat
+
+      - name: Commit verified result branch
+        run: |
+          git config user.name "Vaibhav Lalwani"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git switch -c automation/pr2372-verified-result
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: harden idempotency broadcast evidence for #1840"
+          git push origin HEAD:automation/pr2372-verified-result
