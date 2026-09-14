@@ -12,20 +12,26 @@ old = '''def add_failure_field(path: str, anchor: str = "      sponsored?: boole
 '''
 new = '''def add_failure_field(path: str, anchor: str = "      sponsored?: boolean;\\n") -> None:
     text = load(path)
-    failure_start = text.find("  | {\\n      success: false;")
-    if failure_start < 0:
+    match = re.search(r"\\|\\s*\\{\\n(?P<indent>\\s*)success: false;", text)
+    if not match:
         raise RuntimeError(f"{path}: failure union arm not found")
-    failure_end = text.find("\\n    };", failure_start)
+    failure_start = match.start()
+    # Result unions in these cores use either four or six spaces inside an arm.
+    close_indent = match.group("indent")[:-2]
+    failure_end = text.find("\\n" + close_indent + "};", failure_start)
     if failure_end < 0:
         raise RuntimeError(f"{path}: failure union arm end not found")
     failure = text[failure_start:failure_end]
     if "broadcastAttempted?: boolean;" in failure:
         return
-    pos = failure.rfind(anchor.rstrip("\\n"))
+    needle = anchor.strip()
+    pos = failure.rfind(needle)
     if pos < 0:
-        raise RuntimeError(f"{path}: anchor missing from failure union: {anchor!r}")
-    absolute = failure_start + pos + len(anchor.rstrip("\\n"))
-    text = text[:absolute] + "\\n      broadcastAttempted?: boolean;" + text[absolute:]
+        raise RuntimeError(f"{path}: anchor missing from failure union: {needle!r}")
+    line_start = failure.rfind("\\n", 0, pos) + 1
+    indent = failure[line_start:pos]
+    absolute = failure_start + pos + len(needle)
+    text = text[:absolute] + "\\n" + indent + "broadcastAttempted?: boolean;" + text[absolute:]
     save(path, text)
 '''
 count = text.count(old)
