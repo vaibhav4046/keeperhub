@@ -1,0 +1,332 @@
+name: Vaibhav idempotency evidence final
+
+on:
+  push:
+    branches:
+      - fix/issue-1840-release-key-on-definite-failure
+
+permissions:
+  contents: write
+
+jobs:
+  repair-test-push:
+    if: "!contains(github.event.head_commit.message, '[idempotency-evidence-final]')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Write regression tests first
+        run: |
+          python <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('tests/unit/execute-protocol-idempotency-disposition.test.ts')
+          s = p.read_text()
+          cases = [
+            ('holds the key when write fails without a transaction hash to guard lost sends (#1840)', 'writeContractCoreMock', 'postSwap', 'protocol write'),
+            ('holds the key when the transfer fails without a transaction hash to guard lost sends', 'transferFundsCoreMock', 'postTransfer', 'transfer'),
+            ('holds the key when the contract call fails without a transaction hash to guard lost sends', 'writeContractCoreMock', 'postContractCall', 'contract call'),
+            ('holds the key when the conditional write fails without a transaction hash to guard lost sends', 'writeContractCoreMock', 'postCheckAndExecute', 'conditional write'),
+          ]
+          for old_title, mock, post, label in cases:
+            pat = rf'  it\("{re.escape(old_title)}", async \(\) => \{{.*?\n  \}}\);'
+            replacement = f'''  it("releases the key when the {label} is rejected before broadcast (#1840)", async () => {{
+              {mock}.mockResolvedValue({{
+                success: false,
+                error: "LK: not yet due",
+              }});
+              failExecutionMock.mockResolvedValue({{ status: "failed" }});
+
+              const response = await {post}();
+
+              expect(response.status).toBe(202);
+              expect(lastDisposition()).toBe("release");
+            }});
+
+            it("holds the key when the {label} submission is ambiguous without a hash", async () => {{
+              {mock}.mockResolvedValue({{
+                success: false,
+                error: "provider accepted submission but has not exposed a hash",
+                broadcastAttempted: true,
+              }});
+              failExecutionMock.mockResolvedValue({{ status: "failed" }});
+
+              const response = await {post}();
+
+              expect(response.status).toBe(202);
+              expect(lastDisposition()).toBe("failed");
+            }});'''
+            s, n = re.subn(pat, replacement, s, count=1, flags=re.S)
+            if n != 1:
+              raise SystemExit(f'missing route regression case: {old_title}')
+          p.write_text(s)
+
+          p = Path('tests/unit/submit-signed.test.ts')
+          s = p.read_text()
+          anchor = '''  it("does not invoke sign or any rpc call when populateTransaction throws", async () => {'''
+          if anchor not in s:
+            raise SystemExit('submit-signed insertion anchor missing')
+          test = '''  it("preserves the deterministic hash when a send reply is ambiguous", async () => {
+            const { signer } = makeMockSigner();
+            const { rpcManager } = makeMockRpcManager({
+              broadcastTransaction: vi.fn().mockRejectedValue(new Error("request timed out")),
+              getTransactionReceipt: vi.fn().mockResolvedValue(null),
+              getTransaction: vi.fn().mockResolvedValue(null),
+            });
+
+            await expect(
+              submitSignedTransactionWithFailover(signer, TEST_TX_REQUEST, rpcManager)
+            ).rejects.toMatchObject({
+              name: "OnChainPendingError",
+              kind: "onchain-pending",
+              transactionHash: EXPECTED_HASH,
+            });
+          });
+
+'''
+          if 'preserves the deterministic hash when a send reply is ambiguous' not in s:
+            s = s.replace(anchor, test + anchor)
+          p.write_text(s)
+          PY
+
+      - name: RED - prove the old route guard fails the new acceptance case
+        run: |
+          set +e
+          pnpm exec vitest run tests/unit/execute-protocol-idempotency-disposition.test.ts tests/unit/submit-signed.test.ts > /tmp/red.log 2>&1
+          code=$?
+          cat /tmp/red.log
+          if [ "$code" -eq 0 ]; then
+            echo "Expected the pre-fix route tests to fail, but they passed"
+            exit 1
+          fi
+          grep -q 'expected.*release' /tmp/red.log || grep -q 'release' /tmp/red.log
+
+      - name: Apply evidence-aware implementation
+        run: |
+          python <<'PY'
+          from pathlib import Path
+          import re
+
+          Path('lib/idempotency-disposition.ts').write_text('''/**
+           * How a reserved idempotency record should be settled once work returns.
+           * The dividing line is certainty, not success.
+           */
+          export type IdempotencyDisposition = "success" | "failed" | "release";
+
+          export type IdempotencyExecutionEvidence = {
+            transactionHash?: string;
+            broadcastAttempted?: boolean;
+          };
+
+          /**
+           * `completed` is replayable success. `unconfirmed` is always held.
+           * A `failed` result releases unless the send boundary explicitly says
+           * submission was attempted but no transaction identifier is available.
+           *
+           * Direct EVM sends derive their hash before broadcast, so a lost reply
+           * carries a hash through OnChainPendingError. A hashless write-core
+           * failure is therefore a genuine pre-broadcast rejection unless a
+           * provider (currently Turnkey sponsorship) marks broadcastAttempted.
+           */
+          export function dispositionForExecutionOutcome(
+            status: "completed" | "failed" | "unconfirmed",
+            evidence?: IdempotencyExecutionEvidence
+          ): IdempotencyDisposition {
+            if (status === "completed") {
+              return "success";
+            }
+            if (status === "unconfirmed") {
+              return "failed";
+            }
+            if (evidence?.broadcastAttempted === true && !evidence.transactionHash) {
+              return "failed";
+            }
+            return "release";
+          }
+          ''')
+
+          # The four EVM chain-write routes use the result's send evidence.
+          routes = [
+            'app/api/execute/[...slug]/route.ts',
+            'app/api/execute/transfer/route.ts',
+            'app/api/execute/contract-call/route.ts',
+            'app/api/execute/check-and-execute/route.ts',
+          ]
+          guard = '''  const disposition = result.transactionHash
+              ? dispositionForExecutionOutcome(outcome.status)
+              : "failed";'''
+          for f in routes:
+            p = Path(f); s = p.read_text()
+            if guard not in s:
+              raise SystemExit(f'route guard missing in {f}')
+            s = s.replace(guard, '  const disposition = dispositionForExecutionOutcome(outcome.status, result);', 1)
+            old = '      sponsored: result.sponsored,\n'
+            if old not in s:
+              raise SystemExit(f'failExecution sponsored field missing in {f}')
+            s = s.replace(old, old + '      broadcastAttempted: result.broadcastAttempted,\n', 1)
+            p.write_text(s)
+
+          # Node is intentionally untouched: arbitrary steps may have side effects
+          # with no chain transaction/hash, so its no-hash guard remains conservative.
+
+          # Sponsored providers can have accepted submission before exposing a hash.
+          p = Path('lib/web3/sponsored-send-error.ts'); s = p.read_text()
+          s = s.replace('''      fallback: false;
+              error: string;''', '''      fallback: false;
+              error: string;
+              broadcastAttempted: true;''', 1)
+          # Exactly the two non-fallback decisions are post-submission states.
+          if s.count('      fallback: false,\n') != 2:
+            raise SystemExit('unexpected sponsored fallback:false count')
+          s = s.replace('      fallback: false,\n', '      fallback: false,\n      broadcastAttempted: true,\n')
+          p.write_text(s)
+
+          cores = [
+            'plugins/web3/steps/write-contract-core.ts',
+            'plugins/web3/steps/transfer-funds-core.ts',
+            'plugins/web3/steps/transfer-token-core.ts',
+          ]
+          for f in cores:
+            p = Path(f); s = p.read_text()
+            marker = '''      sponsored?: boolean;
+            };'''
+            if marker not in s:
+              raise SystemExit(f'failure result sponsored marker missing in {f}')
+            s = s.replace(marker, '''      sponsored?: boolean;
+              broadcastAttempted?: boolean;
+            };''', 1)
+            ret = '''          errorClass: decision.errorClass,
+                  sponsored: true,'''
+            if ret not in s:
+              raise SystemExit(f'sponsored failure return missing in {f}')
+            s = s.replace(ret, '''          errorClass: decision.errorClass,
+                  sponsored: true,
+                  broadcastAttempted: decision.broadcastAttempted,''', 1)
+            p.write_text(s)
+
+          # A provider-known attempted send without a hash is unknown, not terminal.
+          p = Path('app/api/execute/_lib/execution-service.ts'); s = p.read_text()
+          marker = '''  sponsored?: boolean;
+            transactionLink?: string;'''
+          if marker not in s:
+            raise SystemExit('FailParams marker missing')
+          s = s.replace(marker, '''  sponsored?: boolean;
+            broadcastAttempted?: boolean;
+            transactionLink?: string;''', 1)
+          old = '''  const status =
+              receipts.length > 0 &&
+              (isInconclusive(receipts) || landedSuccessfully || spentASafeNonce)
+                ? "unconfirmed"
+                : "failed";'''
+          new = '''  const hashlessAttemptStillInFlight =
+              params.broadcastAttempted === true && !params.transactionHash;
+            const status =
+              hashlessAttemptStillInFlight ||
+              (receipts.length > 0 &&
+                (isInconclusive(receipts) || landedSuccessfully || spentASafeNonce))
+                ? "unconfirmed"
+                : "failed";'''
+          if old not in s:
+            raise SystemExit('failExecution status block missing')
+          s = s.replace(old, new, 1)
+          out = '''  if (params.sponsored !== undefined) {
+              failureOutput.sponsored = params.sponsored;
+            }'''
+          if out not in s:
+            raise SystemExit('failureOutput sponsored block missing')
+          s = s.replace(out, out + '''
+            if (params.broadcastAttempted !== undefined) {
+              failureOutput.broadcastAttempted = params.broadcastAttempted;
+            }''', 1)
+          p.write_text(s)
+
+          # Docs now state the actual evidence boundary.
+          p = Path('docs/api/direct-execution.md'); s = p.read_text()
+          old = '''The release is tied to a transaction hash that verified to a conclusive on-chain
+          failure, and only to that. A rejection caught before the transaction was ever
+          submitted produces no hash, and with no hash there is nothing to adjudicate:
+          "never sent" and "sent, reply lost" look identical from here, and treating them
+          alike would let a retry take the next pending nonce while the first attempt sits
+          in the mempool. Those attempts hold the key for the full 24 hours and replay.
+
+          Two consequences worth stating plainly, because they decide what your retry
+          should do:
+
+          - A write-core pre-broadcast rejection (for example `staticCall` or an in-core
+            balance check) is **held**; validation 4xx responses release, while `simulate:
+            true` reserves no idempotency record at all. This is the current distinction.'''
+          new = '''The send boundary preserves evidence instead of making the route guess from a
+          missing RPC reply. Directly signed EVM transactions have a deterministic hash
+          before broadcast, so an ambiguous send keeps that hash and is held/reconciled.
+          A sponsored provider can report that submission was attempted before exposing a
+          hash; that explicit evidence is held too. With neither form of send evidence, a
+          write-core failure is pre-broadcast and the key is released.
+
+          Two consequences worth stating plainly, because they decide what your retry
+          should do:
+
+          - A write-core pre-broadcast rejection (for example `staticCall` or an in-core
+            balance check) is **released**. Validation 4xx responses also release, while
+            `simulate: true` reserves no idempotency record at all.'''
+          if old not in s:
+            raise SystemExit('docs idempotency paragraph missing')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # Remove temporary analysis scaffolding from earlier investigation.
+          for f in ['.github/_idempotency-evidence-notes.md', 'tests/unit/_idempotency-evidence-contract.test.ts', '.github/idempotency-repair-trigger.txt']:
+            Path(f).unlink(missing_ok=True)
+          PY
+
+      - name: Format touched files
+        run: |
+          pnpm exec biome check --write \
+            lib/idempotency-disposition.ts \
+            lib/web3/submit-signed.ts \
+            lib/web3/sponsored-send-error.ts \
+            app/api/execute/_lib/execution-service.ts \
+            app/api/execute/[...slug]/route.ts \
+            app/api/execute/transfer/route.ts \
+            app/api/execute/contract-call/route.ts \
+            app/api/execute/check-and-execute/route.ts \
+            plugins/web3/steps/write-contract-core.ts \
+            plugins/web3/steps/transfer-funds-core.ts \
+            plugins/web3/steps/transfer-token-core.ts \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/submit-signed.test.ts
+
+      - name: GREEN - focused regression suite
+        run: pnpm exec vitest run tests/unit/execute-protocol-idempotency-disposition.test.ts tests/unit/idempotency.test.ts tests/unit/submit-signed.test.ts
+
+      - name: Typecheck
+        run: pnpm type-check
+
+      - name: API docs coverage
+        run: pnpm check:api-docs
+
+      - name: Diff sanity
+        run: |
+          git diff --check
+          grep -n 'result.transactionHash' app/api/execute/node/route.ts | head
+          ! grep -R 'result.transactionHash[[:space:]]*$' app/api/execute/transfer/route.ts app/api/execute/contract-call/route.ts app/api/execute/check-and-execute/route.ts app/api/execute/\[...slug\]/route.ts
+
+      - name: Commit verified repair
+        run: |
+          git config user.name "Vaibhav Lalwani"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: distinguish preflight rejection from ambiguous send [idempotency-evidence-final]"
+          git push origin HEAD:fix/issue-1840-release-key-on-definite-failure
