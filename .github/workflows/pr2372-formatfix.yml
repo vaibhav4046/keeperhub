@@ -1,0 +1,40 @@
+name: PR 2372 format fix
+
+on:
+  push:
+    branches:
+      - automation/pr2372-formatfix-3b2c
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-1840-release-key-on-definite-failure
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm biome format --write tests/unit/execute-protocol-idempotency-disposition.test.ts
+
+      - name: Commit formatting repair only
+        run: |
+          git diff --check
+          test "$(git diff --name-only)" = "tests/unit/execute-protocol-idempotency-disposition.test.ts"
+          git config user.name "Vaibhav Lalwani"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git add tests/unit/execute-protocol-idempotency-disposition.test.ts
+          git commit -m "style: format idempotency disposition regression test"
+          git push origin HEAD:fix/issue-1840-release-key-on-definite-failure
