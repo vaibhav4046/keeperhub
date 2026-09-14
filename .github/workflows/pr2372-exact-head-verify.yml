@@ -1,0 +1,77 @@
+name: PR 2372 exact HEAD verify
+
+on:
+  push:
+    branches:
+      - automation/pr2372-verify-db2f3a8
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: db2f3a8fd98d115acd8b31b9d00991f42994cf53
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate plugin registry
+        run: pnpm discover-plugins
+
+      - name: Focused safety regression tests
+        run: >-
+          pnpm vitest run
+          tests/unit/idempotency-disposition-evidence.test.ts
+          tests/unit/execute-protocol-idempotency-disposition.test.ts
+          tests/unit/execution-service-safe-inner-failure.test.ts
+          tests/unit/idempotency.test.ts
+          tests/unit/submit-signed.test.ts
+
+      - name: Type check
+        run: pnpm type-check
+
+      - name: Biome changed TypeScript
+        run: >-
+          pnpm biome check
+          app/api/execute/[...slug]/route.ts
+          app/api/execute/_lib/execution-service.ts
+          app/api/execute/check-and-execute/route.ts
+          app/api/execute/contract-call/route.ts
+          app/api/execute/node/route.ts
+          app/api/execute/transfer/route.ts
+          lib/idempotency-disposition.ts
+          lib/idempotency.ts
+          lib/web3/sponsored-send-error.ts
+          lib/web3/submit-signed.ts
+          plugins/web3/steps/transfer-funds-core.ts
+          plugins/web3/steps/transfer-token-core.ts
+          plugins/web3/steps/write-contract-core.ts
+          tests/unit/execute-protocol-idempotency-disposition.test.ts
+          tests/unit/execution-service-safe-inner-failure.test.ts
+          tests/unit/idempotency-disposition-evidence.test.ts
+          tests/unit/idempotency.test.ts
+          tests/unit/submit-signed.test.ts
+
+      - name: API docs validation
+        run: pnpm check:api-docs
+
+      - name: Diff and whitespace safety
+        run: |
+          git fetch https://github.com/KeeperHub/keeperhub.git staging:refs/remotes/upstream/staging
+          git diff --check upstream/staging...HEAD
+          git diff --name-only upstream/staging...HEAD
