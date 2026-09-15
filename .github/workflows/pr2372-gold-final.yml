@@ -1,0 +1,223 @@
+name: PR2372 Final Gold Verification
+
+on:
+  push:
+    branches:
+      - verify/pr2372-gold-final-20260915
+
+permissions:
+  contents: read
+
+env:
+  TARGET_SHA: c4cfcfff05730787f05c4d88cc9cf41146a069f4
+  BASE_SHA: 75f25e7d8c39b54dc1becc13fad64fa986560192
+
+jobs:
+  check-title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate exact PR title
+        env:
+          PR_TITLE: "fix: #1840 release the idempotency key on a definite failure"
+        run: |
+          set -euo pipefail
+          PATTERN="^(feat|fix|bug|hotfix|breaking|chore|docs|refactor|test|ci|build|perf|style|release)(\([^)]*\))?[!]?:[[:space:]].+"
+          printf '%s' "$PR_TITLE" | grep -qiE "$PATTERN"
+
+  diff-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+      - name: Verify exact base ancestry and clean patch
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git cat-file -e "$BASE_SHA^{commit}"
+          git merge-base --is-ancestor "$BASE_SHA" "$TARGET_SHA"
+          git diff --check "$BASE_SHA...$TARGET_SHA"
+          files=$(git diff --name-only "$BASE_SHA...$TARGET_SHA")
+          if [ -n "$files" ]; then
+            if printf '%s\n' "$files" | xargs grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- 2>/dev/null; then
+              echo "::error::Conflict marker found in PR diff"
+              exit 1
+            fi
+          fi
+          if printf '%s\n' "$files" | grep -q '^\.github/workflows/pr2372-gold-final\.yml$'; then
+            echo "::error::Temporary verifier leaked into target tree"
+            exit 1
+          fi
+
+  migrate-check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: keeperhub_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+      - name: Match PR migration gate
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/keeperhub_test
+        run: |
+          set -euo pipefail
+          relevant=$(git diff --name-only "$BASE_SHA...$TARGET_SHA" | grep -E '^(drizzle/|lib/db/schema)' || true)
+          if [ -z "$relevant" ]; then
+            echo "No migration-relevant changes"
+            exit 0
+          fi
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm db:setup-workflow
+          pnpm db:migrate
+          npx drizzle-kit generate 2>&1 | tee /tmp/drizzle-generate-output.txt
+          grep -q "nothing to migrate" /tmp/drizzle-generate-output.txt
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - uses: ./.github/actions/setup-node-pnpm
+        with:
+          discover-plugins: "true"
+      - name: Repository check including API docs
+        run: pnpm check
+      - name: API docs idempotency
+        run: |
+          pnpm check:api-docs
+          git diff --exit-code specs/api-coverage.json
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - uses: ./.github/actions/setup-node-pnpm
+        with:
+          discover-plugins: "true"
+      - run: pnpm type-check
+      - run: pnpm type-check:executor
+
+  focused-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - uses: ./.github/actions/setup-node-pnpm
+        with:
+          discover-plugins: "true"
+      - name: Run #1840 safety regressions
+        run: pnpm exec vitest run tests/unit/idempotency-disposition-evidence.test.ts tests/unit/idempotency.test.ts tests/unit/execute-protocol-idempotency-disposition.test.ts tests/unit/execution-service-safe-inner-failure.test.ts tests/unit/submit-signed.test.ts tests/unit/transfer-spl-token.test.ts tests/unit/write-contract-core.test.ts
+
+  test-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - uses: ./.github/actions/setup-node-pnpm
+        with:
+          discover-plugins: "true"
+      - run: pnpm test:unit __tests__ keeperhub-metrics-collector
+
+  test-db:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: keeperhub_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/keeperhub_test
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - uses: ./.github/actions/setup-node-pnpm
+        with:
+          discover-plugins: "true"
+      - run: pnpm db:migrate
+      - run: pnpm test:db
+
+  test-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - uses: ./.github/actions/setup-node-pnpm
+        with:
+          discover-plugins: "true"
+      - run: pnpm test:integration
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_SHA }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Exact fork-style app build
+        uses: docker/bake-action@v7
+        env:
+          ECR_REGISTRY: ""
+          ECR_REPO: ""
+          NEXT_PUBLIC_AUTH_PROVIDERS: ""
+          NEXT_PUBLIC_GITHUB_CLIENT_ID: ""
+          NEXT_PUBLIC_GOOGLE_CLIENT_ID: ""
+          NEXT_PUBLIC_BILLING_ENABLED: ""
+          NEXT_PUBLIC_GAS_SPONSORSHIP_ENABLED: ""
+          NEXT_PUBLIC_SENTRY_DSN: ""
+        with:
+          files: docker-bake.hcl
+          targets: app
+          push: false
+
+  db-prep-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+      - name: Verify no DB-prep directive introduced
+        run: |
+          set -euo pipefail
+          found=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            [ -f "$f" ] || continue
+            if head -n 5 "$f" | grep -qE '^[[:space:]]*--[[:space:]]*@requires-db-prep([[:space:]]|$)'; then
+              echo "::error::DB prep required by $f"
+              found=true
+            fi
+          done < <(git diff --name-only --diff-filter=AM "$BASE_SHA...$TARGET_SHA" -- 'drizzle/*.sql')
+          test "$found" = false
