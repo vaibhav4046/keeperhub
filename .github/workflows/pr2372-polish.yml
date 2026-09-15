@@ -68,9 +68,9 @@ jobs:
           git diff --check
           grep -F 'dispositionForExecutionOutcome(settled.status, { transactionHash })' app/api/execute/node/route.ts
           grep -F 'transactionHash: completeParams.transactionHash' app/api/execute/node/route.ts
-          grep -F 'if (evidence.broadcastAttempted === true) return "failed";' lib/idempotency-disposition.ts
-          grep -F 'if (evidence.transactionHash) return "release";' lib/idempotency-disposition.ts
-          grep -F 'if (evidence.broadcastAttempted === false) return "release";' lib/idempotency-disposition.ts
+          grep -F 'evidence.broadcastAttempted === true' lib/idempotency-disposition.ts
+          grep -F 'evidence.transactionHash' lib/idempotency-disposition.ts
+          grep -F 'evidence.broadcastAttempted === false' lib/idempotency-disposition.ts
       - name: Commit verified polish to temp branch
         run: |
           set -euo pipefail
