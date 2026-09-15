@@ -1,0 +1,49 @@
+name: PR 2372 node evidence final
+on:
+  push:
+    branches: [automation/pr2372-node-evidence-final]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Apply exact reviewer fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app/api/execute/node/route.ts')
+          s = p.read_text()
+          old1 = '''const disposition = transactionHash\n      ? dispositionForExecutionOutcome(settled.status)\n      : "failed";'''
+          new1 = '''const disposition = transactionHash\n      ? dispositionForExecutionOutcome(settled.status, { transactionHash })\n      : "failed";'''
+          old2 = '''const disposition = completeParams.transactionHash\n      ? dispositionForExecutionOutcome(outcome.status)\n      : "failed";'''
+          new2 = '''const disposition = completeParams.transactionHash\n      ? dispositionForExecutionOutcome(outcome.status, {\n          transactionHash: completeParams.transactionHash,\n        })\n      : "failed";'''
+          assert s.count(old1) == 1, s.count(old1)
+          assert s.count(old2) == 1, s.count(old2)
+          s = s.replace(old1, new1).replace(old2, new2)
+          p.write_text(s)
+          PY
+      - name: Verify focused safety tests
+        run: pnpm exec vitest run tests/unit/idempotency-disposition-evidence.test.ts tests/unit/execute-protocol-idempotency-disposition.test.ts tests/unit/execution-service-safe-inner-failure.test.ts
+      - name: Typecheck
+        run: pnpm exec tsgo --noEmit
+      - name: Biome changed route
+        run: pnpm exec biome check app/api/execute/node/route.ts
+      - name: Commit verified patch only
+        run: |
+          rm .github/workflows/pr2372-node-evidence-final.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add app/api/execute/node/route.ts .github/workflows/pr2372-node-evidence-final.yml
+          git commit -m "fix: pass node transaction hash to idempotency disposition"
+          git push origin HEAD:automation/pr2372-node-evidence-final
