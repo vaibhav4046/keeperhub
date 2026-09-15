@@ -1,0 +1,102 @@
+name: PR2372 Final Review Polish
+
+on:
+  push:
+    branches:
+      - verify/pr2372-polish-20260915
+
+permissions:
+  contents: write
+
+jobs:
+  polish-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: keeperhub_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/keeperhub_test
+      BASE_SHA: 75f25e7d8c39b54dc1becc13fad64fa986560192
+      ORIGINAL_HEAD: 56dc470d30581168ae9138555444a16880400f93
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Apply exact mechanical cleanup
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          replacements = {
+            'plugins/web3/steps/approve-token-core.ts': [
+              ('      sponsored?: boolean;\n          broadcastAttempted?: boolean;', '      sponsored?: boolean;\n      broadcastAttempted?: boolean;'),
+              ('\n       let receivedTransactionHash: string | undefined;\n', '\n    let receivedTransactionHash: string | undefined;\n'),
+            ],
+            'plugins/web3/steps/transfer-token-core.ts': [
+              ('\n       let receivedTransactionHash: string | undefined;\n', '\n    let receivedTransactionHash: string | undefined;\n'),
+            ],
+            'plugins/robinhood/steps/trade-stock-token-core.ts': [
+              ('      chainId?: number;\n          broadcastAttempted?: boolean;', '      chainId?: number;\n      broadcastAttempted?: boolean;'),
+            ],
+            'plugins/web3/steps/batch-write-contract-core.ts': [
+              ('    totalCalls?: number;\n      broadcastAttempted?: boolean;\n    };', '    totalCalls?: number;\n    broadcastAttempted?: boolean;\n  };'),
+            ],
+          }
+          for name, edits in replacements.items():
+            path = Path(name)
+            text = path.read_text()
+            for old, new in edits:
+              if text.count(old) != 1:
+                raise SystemExit(f'{name}: expected one exact match for {old!r}')
+              text = text.replace(old, new, 1)
+            path.write_text(text)
+          PY
+          git diff --check
+      - uses: ./.github/actions/setup-node-pnpm
+        with:
+          discover-plugins: 'true'
+      - name: Focused safety tests
+        run: pnpm exec vitest run tests/unit/idempotency-disposition-evidence.test.ts tests/unit/idempotency.test.ts tests/unit/execute-protocol-idempotency-disposition.test.ts tests/unit/execution-service-safe-inner-failure.test.ts tests/unit/submit-signed.test.ts tests/unit/transfer-spl-token.test.ts tests/unit/write-contract-core.test.ts
+      - name: Repository checks
+        run: |
+          pnpm check
+          pnpm check:api-docs
+          git diff --exit-code specs/api-coverage.json
+          pnpm type-check
+          pnpm type-check:executor
+      - name: Full test suites
+        run: |
+          pnpm test:unit __tests__ keeperhub-metrics-collector
+          pnpm test:integration
+          pnpm db:migrate
+          pnpm test:db
+      - name: Safety diff gate
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$BASE_SHA" "$ORIGINAL_HEAD"
+          git diff --check
+          grep -F 'dispositionForExecutionOutcome(settled.status, { transactionHash })' app/api/execute/node/route.ts
+          grep -F 'transactionHash: completeParams.transactionHash' app/api/execute/node/route.ts
+          grep -F 'if (evidence.broadcastAttempted === true) return "failed";' lib/idempotency-disposition.ts
+          grep -F 'if (evidence.transactionHash) return "release";' lib/idempotency-disposition.ts
+          grep -F 'if (evidence.broadcastAttempted === false) return "release";' lib/idempotency-disposition.ts
+      - name: Commit verified polish to temp branch
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add plugins/web3/steps/approve-token-core.ts plugins/web3/steps/transfer-token-core.ts plugins/robinhood/steps/trade-stock-token-core.ts plugins/web3/steps/batch-write-contract-core.ts
+          git commit -m 'style: clean review patch indentation'
+          git push origin HEAD:verify/pr2372-polish-20260915
