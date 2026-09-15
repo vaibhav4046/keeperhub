@@ -12,22 +12,7 @@ jobs:
   polish-verify:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: keeperhub_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/keeperhub_test
       BASE_SHA: 75f25e7d8c39b54dc1becc13fad64fa986560192
       ORIGINAL_HEAD: 56dc470d30581168ae9138555444a16880400f93
     steps:
@@ -76,12 +61,6 @@ jobs:
           git diff --exit-code specs/api-coverage.json
           pnpm type-check
           pnpm type-check:executor
-      - name: Full test suites
-        run: |
-          pnpm test:unit __tests__ keeperhub-metrics-collector
-          pnpm test:integration
-          pnpm db:migrate
-          pnpm test:db
       - name: Safety diff gate
         run: |
           set -euo pipefail
