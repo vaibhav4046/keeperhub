@@ -1,0 +1,110 @@
+name: PR 2372 rebase verify
+on:
+  push:
+    branches: [automation/pr2372-rebase-verify-20260915]
+permissions:
+  contents: write
+jobs:
+  rebase-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Rebase exact PR head onto current upstream staging
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git || true
+          git fetch origin fix/issue-1840-release-key-on-definite-failure
+          git fetch upstream staging
+          git reset --hard origin/fix/issue-1840-release-key-on-definite-failure
+          echo "SOURCE_HEAD=$(git rev-parse HEAD)"
+          echo "STAGING_HEAD=$(git rev-parse upstream/staging)"
+
+          set +e
+          GIT_EDITOR=true git rebase upstream/staging
+          rc=$?
+          set -e
+          while [ "$rc" -ne 0 ]; do
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            echo "Rebase stopped; conflicts:"
+            printf '%s\n' "$conflicts"
+            if [ "$conflicts" = "specs/api-coverage.json" ]; then
+              # Generated line-number index. Preserve current staging's generated
+              # version while replaying; regenerate from the final merged docs below.
+              git checkout --ours -- specs/api-coverage.json
+              git add specs/api-coverage.json
+              set +e
+              GIT_EDITOR=true git rebase --continue
+              rc=$?
+              set -e
+            else
+              echo 'Unexpected semantic conflict; refusing automatic resolution.'
+              git status --short
+              git diff --cc --no-ext-diff
+              exit 2
+            fi
+          done
+          git merge-base --is-ancestor upstream/staging HEAD
+          echo "REBASED_HEAD=$(git rev-parse HEAD)"
+
+      - name: Install dependencies and generate registry
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm discover-plugins
+
+      - name: Regenerate and validate API docs coverage
+        run: |
+          pnpm check:api-docs
+          if ! git diff --quiet -- specs/api-coverage.json; then
+            git add specs/api-coverage.json
+            git commit -m "chore: refresh API coverage after staging rebase"
+          fi
+          pnpm check:api-docs
+          git diff --exit-code -- specs/api-coverage.json
+
+      - name: Focused idempotency safety tests
+        run: |
+          pnpm exec vitest run \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/unit/idempotency.test.ts \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/transfer-spl-token.test.ts \
+            tests/unit/write-contract-core.test.ts
+
+      - name: Typecheck
+        run: pnpm type-check
+
+      - name: Biome changed source and tests
+        run: |
+          mapfile -t files < <(git diff --name-only upstream/staging...HEAD | grep -E '\.(ts|tsx|js|jsx|json)$' || true)
+          if [ "${#files[@]}" -gt 0 ]; then
+            pnpm exec biome check "${files[@]}"
+          fi
+
+      - name: Final diff and safety checks
+        run: |
+          git diff --check upstream/staging...HEAD
+          ! git grep -n '^<<<<<<< ' -- . ':!.github/workflows' || exit 1
+          ! git grep -n '^>>>>>>> ' -- . ':!.github/workflows' || exit 1
+          test "$(git rev-parse upstream/staging)" = "$(git merge-base upstream/staging HEAD)"
+          test ! -e .github/workflows/pr2372-rebase-verify.yml
+          echo "FINAL_HEAD=$(git rev-parse HEAD)"
+          echo 'Changed files vs staging:'
+          git diff --stat upstream/staging...HEAD
+
+      - name: Publish verified rebased result to temporary branch
+        run: |
+          git push --force origin HEAD:automation/pr2372-rebased-result-20260915
