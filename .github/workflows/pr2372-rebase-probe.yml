@@ -1,0 +1,37 @@
+name: PR 2372 rebase probe
+on:
+  push:
+    branches: [automation/pr2372-rebase-probe-20260915]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rebase probe against current upstream staging
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git || true
+          git fetch upstream staging
+          echo "HEAD_BEFORE=$(git rev-parse HEAD)"
+          echo "STAGING=$(git rev-parse upstream/staging)"
+          set +e
+          GIT_EDITOR=true git rebase upstream/staging
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo '=== CONFLICT FILES ==='
+            git diff --name-only --diff-filter=U
+            echo '=== STATUS ==='
+            git status --short
+            echo '=== CONFLICT DIFF ==='
+            git diff --cc --no-ext-diff
+            exit "$rc"
+          fi
+          echo "HEAD_AFTER=$(git rev-parse HEAD)"
+          git merge-base --is-ancestor upstream/staging HEAD
+          git diff --check upstream/staging...HEAD
