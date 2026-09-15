@@ -135,8 +135,8 @@ export type BatchWriteContractResult =
     // resolution, a whole-batch revert on the staticCall itself).
     results?: BatchWriteCallResult[];
     totalCalls?: number;
-      broadcastAttempted?: boolean;
-    };
+    broadcastAttempted?: boolean;
+  };
 
 /**
  * Soften an execution failure into a success value when failOnError=false, so

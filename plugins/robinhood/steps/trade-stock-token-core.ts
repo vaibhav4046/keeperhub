@@ -107,7 +107,7 @@ export type TradeStockTokenResult =
       // pre-broadcast failures, where no transaction exists.
       transactionHash?: string;
       chainId?: number;
-          broadcastAttempted?: boolean;
+      broadcastAttempted?: boolean;
     };
 
 /** Refusals that are the caller's to fix, phrased so they can fix them. */

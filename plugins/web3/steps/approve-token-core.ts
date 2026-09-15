@@ -130,7 +130,7 @@ export type ApproveTokenResult =
       // True when the terminal failure came from the gas-sponsored path, so
       // the finalizer can report the route accurately on a failed execution.
       sponsored?: boolean;
-          broadcastAttempted?: boolean;
+      broadcastAttempted?: boolean;
     };
 
 /**
@@ -484,7 +484,7 @@ async function approveTokenCoreImpl(
     // Keep contract instance for error formatting in catch block
     const contract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
 
-       let receivedTransactionHash: string | undefined;
+    let receivedTransactionHash: string | undefined;
     try {
       // Get token decimals and symbol via failover
       const [decimals, symbol] = await rpcManager.executeWithFailover(

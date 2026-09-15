@@ -582,7 +582,7 @@ async function transferTokenCoreImpl(
     // Create contract instance for the actual write (needs signer)
     const contract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
 
-       let receivedTransactionHash: string | undefined;
+    let receivedTransactionHash: string | undefined;
     try {
       const tokenHolderAddress =
         signerMode.kind === SIGNER_MODE.SAFE_ROLE || signerMode.kind === SIGNER_MODE.SAFE
