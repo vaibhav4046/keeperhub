@@ -280,7 +280,7 @@ async function handleResult(
     // here may have had a side effect (a message sent, a webhook delivered)
     // before it reported failure. Hold the key in that case.
     const disposition = transactionHash
-      ? dispositionForExecutionOutcome(settled.status)
+      ? dispositionForExecutionOutcome(settled.status, { transactionHash })
       : "failed";
     return recordIdempotentResponse(
       idem,
@@ -327,7 +327,9 @@ async function handleResult(
     // to adjudicate. This invariant currently follows from isTransactionResult,
     // but keeping the guard here makes the safety boundary local and pinned.
     const disposition = completeParams.transactionHash
-      ? dispositionForExecutionOutcome(outcome.status)
+      ? dispositionForExecutionOutcome(outcome.status, {
+          transactionHash: completeParams.transactionHash,
+        })
       : "failed";
     return recordIdempotentResponse(
       idem,
