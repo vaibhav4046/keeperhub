@@ -1,0 +1,35 @@
+name: PR2372 Review4 Rebase Probe
+
+on:
+  push:
+    branches:
+      - verify/pr2372-review4-probe-20260916
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Probe exact rebase
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git || true
+          git fetch upstream staging
+          git reset --hard c4cfcfff05730787f05c4d88cc9cf41146a069f4
+          echo "PR_HEAD=$(git rev-parse HEAD)"
+          echo "STAGING=$(git rev-parse upstream/staging)"
+          if git rebase upstream/staging; then
+            echo "REBASE_OK=$(git rev-parse HEAD)"
+          else
+            echo 'CONFLICTS:'
+            git diff --name-only --diff-filter=U
+            git status --short
+            exit 1
+          fi
