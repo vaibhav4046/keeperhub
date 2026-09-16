@@ -10,7 +10,6 @@ permissions:
 
 env:
   ORIGINAL_HEAD: c4cfcfff05730787f05c4d88cc9cf41146a069f4
-  EXPECTED_STAGING: 842ec84dc6552d1df83e40a10fa9a15a2287f45f
 
 jobs:
   fix-verify:
@@ -35,17 +34,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Rebase exact PR head onto reviewed staging
+      - name: Reset to exact reviewed PR head
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git remote add upstream https://github.com/KeeperHub/keeperhub.git || true
-          git fetch upstream staging
-          test "$(git rev-parse upstream/staging)" = "$EXPECTED_STAGING"
           git reset --hard "$ORIGINAL_HEAD"
-          git rebase upstream/staging
-          test "$(git merge-base HEAD upstream/staging)" = "$EXPECTED_STAGING"
       - name: Apply review-four fixes and regression tests
         run: |
           set -euo pipefail
@@ -65,7 +59,7 @@ jobs:
           '''    const chainId =\n      output && typeof output.chainId === "number" ? output.chainId : undefined;\n    const broadcastAttempted =\n      output && typeof output.broadcastAttempted === "boolean"\n        ? output.broadcastAttempted\n        : undefined;\n    const settled = await failExecution(executionId, errorMsg, {\n      transactionHash,\n      chainId,\n      broadcastAttempted,\n    });''')
           replace_once(path,
           '''    // Only a hash lets failExecution adjudicate anything: with one, its verdict\n    // decides the key (conclusive failure releases, unreadable holds). Without\n    // one it answers "failed" from the mere absence of a hash, and on this route\n    // that is not evidence -- unlike the chain-write routes, an arbitrary step\n    // here may have had a side effect (a message sent, a webhook delivered)\n    // before it reported failure. Hold the key in that case.\n    const disposition = transactionHash\n      ? dispositionForExecutionOutcome(settled.status, { transactionHash })\n      : "failed";''',
-          '''    // A hash is only release evidence when failExecution had a numeric chainId\n    // and therefore had enough information to adjudicate its receipt. Arbitrary\n    // node output is untrusted: a hash paired with a missing/string chainId must\n    // fail closed, because the transaction may already be live on the network.\n    const disposition =\n      transactionHash && chainId !== undefined\n        ? dispositionForExecutionOutcome(settled.status, { transactionHash })\n        : "failed";''')
+          '''    // A hash is release evidence only when failExecution also received a\n    // numeric chainId and therefore had enough information to adjudicate the\n    // receipt. Arbitrary node output is untrusted: a hash paired with a missing\n    // or string chainId must fail closed because the transaction may be live.\n    const disposition =\n      transactionHash && chainId !== undefined\n        ? dispositionForExecutionOutcome(settled.status, { transactionHash })\n        : "failed";''')
           replace_once(path,
           '''    completeParams.chainId = output.chainId;''',
           '''    completeParams.chainId =\n      typeof output.chainId === "number" ? output.chainId : undefined;''')
@@ -73,29 +67,32 @@ jobs:
           '''    const disposition = completeParams.transactionHash\n      ? dispositionForExecutionOutcome(outcome.status, {\n          transactionHash: completeParams.transactionHash,\n        })\n      : "failed";''',
           '''    const disposition =\n      completeParams.transactionHash && completeParams.chainId !== undefined\n        ? dispositionForExecutionOutcome(outcome.status, {\n            transactionHash: completeParams.transactionHash,\n          })\n        : "failed";''')
 
-          for path, type_name, fn_name in [
-              ('plugins/web3/steps/send-raw-solana-instruction-core.ts', 'SendRawSolanaInstructionResult', 'sendRawSolanaInstructionCore'),
-              ('plugins/web3/steps/call-solana-program-core.ts', 'CallSolanaProgramResult', 'callSolanaProgramCore'),
+          for path, type_name, fn_name, input_name in [
+              ('plugins/web3/steps/send-raw-solana-instruction-core.ts', 'SendRawSolanaInstructionResult', 'sendRawSolanaInstructionCore', 'SendRawSolanaInstructionCoreInput'),
+              ('plugins/web3/steps/call-solana-program-core.ts', 'CallSolanaProgramResult', 'callSolanaProgramCore', 'CallSolanaProgramCoreInput'),
           ]:
               p = Path(path)
               text = p.read_text()
-              text = text.replace('| { success: false; error: string };', '| { success: false; error: string; broadcastAttempted?: boolean };', 1)
+              old_failure = '| { success: false; error: string };'
+              if text.count(old_failure) != 1:
+                  raise SystemExit(f'{path}: failure type mismatch')
+              text = text.replace(old_failure, '| { success: false; error: string; broadcastAttempted?: boolean };', 1)
               sig = f'export async function {fn_name}('
               if text.count(sig) != 1:
                   raise SystemExit(f'{path}: function signature mismatch')
               text = text.replace(sig, f'async function {fn_name}Impl(', 1)
               old_catch = '    return { success: false, error: getErrorMessage(error) };\n  }\n}'
-              new_catch = '    return {\n      success: false,\n      error: getErrorMessage(error),\n      broadcastAttempted: true,\n    };\n  }\n}\n\n/**\n * Idempotency evidence boundary. Any hashless failure that leaves the impl\n * without explicit send evidence came from an early return before submit, so\n * it is safe to mark pre-broadcast. This intentionally overrides the shared\n * fail-closed default; every future early return added to the impl must remain\n * pre-broadcast or set broadcastAttempted explicitly.\n */\nexport async function ' + fn_name + '(\n  input: ' + ('SendRawSolanaInstructionCoreInput' if 'send-raw' in path else 'CallSolanaProgramCoreInput') + '\n): Promise<' + type_name + '> {\n  const result = await ' + fn_name + 'Impl(input);\n  if (!result.success && result.broadcastAttempted === undefined) {\n    return { ...result, broadcastAttempted: false };\n  }\n  return result;\n}'
+              new_catch = f'''    return {{\n      success: false,\n      error: getErrorMessage(error),\n      broadcastAttempted: true,\n    }};\n  }}\n}}\n\n/**\n * Idempotency evidence boundary. Stamping `broadcastAttempted: false` on an\n * otherwise evidence-free failure intentionally overrides the shared fail-closed\n * default. It is safe only because every early return in {fn_name}Impl is\n * pre-broadcast; every future early return must preserve that invariant or set\n * broadcastAttempted explicitly. Post-submit failures carry `true`.\n */\nexport async function {fn_name}(\n  input: {input_name}\n): Promise<{type_name}> {{\n  const result = await {fn_name}Impl(input);\n  if (!result.success && result.broadcastAttempted === undefined) {{\n    return {{ ...result, broadcastAttempted: false }};\n  }}\n  return result;\n}}'''
               if text.count(old_catch) != 1:
                   raise SystemExit(f'{path}: terminal catch mismatch {text.count(old_catch)}')
               p.write_text(text.replace(old_catch, new_catch, 1))
 
           path = 'plugins/web3/steps/write-contract-core.ts'
           replace_once(path,
-          '''      const rejection = maybeHash ? undefined : classifyRevert(error);''',
-          '''      // Keep caller-provided errorAbis out of classification. `rejection` is\n      // idempotency release evidence, so allowing a caller ABI to decode an\n      // arbitrary post-broadcast provider error as a known revert could release\n      // a key while its transaction is still live. errorAbis are formatting-only.\n      const rejection = maybeHash ? undefined : classifyRevert(error);''')
+          '''      const rejection = classifyRevert(error, contractInterface);''',
+          '''      // Keep caller-provided errorAbis out of classification. `rejection` is\n      // idempotency release evidence, so allowing a caller ABI to decode an\n      // arbitrary post-broadcast provider error as a known revert could release\n      // a key while its transaction is still live. errorAbis are formatting-only.\n      const rejection = classifyRevert(error, contractInterface);''')
           replace_once(path,
-          '''/**\n * Fail-closed boundary for idempotency evidence: any failure that exits before\n * the send path must explicitly say no broadcast occurred. Failures raised\n * after the send path already carry an explicit boolean (or a tx hash).\n */''',
+          '''/** Explicitly marks every hashless early return as pre-broadcast evidence. */''',
           '''/**\n * Idempotency evidence boundary. Stamping `broadcastAttempted: false` on an\n * otherwise evidence-free failure intentionally overrides the shared fail-closed\n * default. It is safe only because every early return in writeContractCoreImpl\n * is pre-broadcast; every future early return must preserve that invariant or\n * set broadcastAttempted explicitly. Post-send failures already carry evidence.\n */''')
           PY
 
@@ -114,18 +111,12 @@ jobs:
             enforceExecutionLimit: vi.fn(async () => ({ blocked: false })),
           }));
           vi.mock("@/lib/db", () => ({ db: {} }));
-          vi.mock("@/lib/db/org-helpers", () => ({
-            enterApiExecuteErrorContext: vi.fn(async () => undefined),
-          }));
+          vi.mock("@/lib/db/org-helpers", () => ({ enterApiExecuteErrorContext: vi.fn(async () => undefined) }));
           vi.mock("@/lib/db/schema", () => ({ integrations: {} }));
           vi.mock("@/lib/mcp/oauth-scopes", () => ({ SCOPE_MCP_WRITE: "mcp:write" }));
           vi.mock("@/lib/middleware/require-scope", () => ({ requireScope: vi.fn(() => null) }));
-          vi.mock("@/lib/rate-limit-headers", () => ({
-            applyRateLimitHeaders: (response: Response) => response,
-          }));
-          vi.mock("@/lib/utils", () => ({
-            getErrorMessage: (error: unknown) => error instanceof Error ? error.message : String(error),
-          }));
+          vi.mock("@/lib/rate-limit-headers", () => ({ applyRateLimitHeaders: (response: Response) => response }));
+          vi.mock("@/lib/utils", () => ({ getErrorMessage: (error: unknown) => error instanceof Error ? error.message : String(error) }));
           vi.mock("@/lib/idempotency", async () => {
             const { dispositionForExecutionOutcome } = await import("@/lib/idempotency-disposition");
             return {
@@ -138,26 +129,16 @@ jobs:
             };
           });
           vi.mock("@/app/api/execute/_lib/auth", () => ({
-            validateApiKey: vi.fn(async () => ({
-              organizationId: "org-1",
-              apiKeyId: "key-1",
-              scope: "mcp:write",
-              credentialType: "api-key",
-            })),
+            validateApiKey: vi.fn(async () => ({ organizationId: "org-1", apiKeyId: "key-1", scope: "mcp:write", credentialType: "api-key" })),
           }));
           vi.mock("@/app/api/execute/_lib/action-resolver", () => ({
             resolveAction: vi.fn(() => ({
               actionType: "test-action",
               label: "Test action",
-              importer: {
-                stepFunction: "run",
-                importer: async () => ({ run: h.step }),
-              },
+              importer: { stepFunction: "run", importer: async () => ({ run: h.step }) },
             })),
           }));
-          vi.mock("@/app/api/execute/_lib/concurrency-limit", () => ({
-            enforceDirectExecutionConcurrency: vi.fn(async () => null),
-          }));
+          vi.mock("@/app/api/execute/_lib/concurrency-limit", () => ({ enforceDirectExecutionConcurrency: vi.fn(async () => null) }));
           vi.mock("@/app/api/execute/_lib/execution-service", () => ({
             createExecution: vi.fn(async () => ({ executionId: "exec-1" })),
             markRunning: vi.fn(async () => undefined),
@@ -167,32 +148,24 @@ jobs:
             setRetryCount: vi.fn(async () => undefined),
             withRejectedSignerOverride: (input: unknown) => input,
           }));
-          vi.mock("@/app/api/execute/_lib/rate-limit", () => ({
-            checkRateLimit: vi.fn(() => ({ allowed: true })),
-          }));
-          vi.mock("@/app/api/execute/_lib/reserved-value", () => ({
-            parseNodeNativeValueWei: vi.fn(),
-          }));
+          vi.mock("@/app/api/execute/_lib/rate-limit", () => ({ checkRateLimit: vi.fn(() => ({ allowed: true })) }));
+          vi.mock("@/app/api/execute/_lib/reserved-value", () => ({ parseNodeNativeValueWei: vi.fn() }));
           vi.mock("@/app/api/execute/_lib/retry", () => ({
             DEFAULT_TIMEOUT_MS: 30_000,
             executeWithRetry: vi.fn(),
             genericRetryOptions: {},
             transactionRetryOptions: {},
           }));
-          vi.mock("@/app/api/execute/_lib/spending-cap", () => ({
-            checkAndReserveExecution: vi.fn(),
-          }));
+          vi.mock("@/app/api/execute/_lib/spending-cap", () => ({ checkAndReserveExecution: vi.fn() }));
           vi.mock("@/app/api/execute/_lib/wallet-check", () => ({ requireWallet: vi.fn() }));
 
           import { POST } from "@/app/api/execute/node/route";
 
-          const request = () =>
-            new Request("http://localhost/api/execute/node", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ actionType: "test-action", config: {} }),
-            });
-
+          const request = () => new Request("http://localhost/api/execute/node", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ actionType: "test-action", config: {} }),
+          });
           const lastDisposition = () => h.record.mock.calls.at(-1)?.[2];
 
           beforeEach(() => {
@@ -203,7 +176,7 @@ jobs:
           });
 
           describe("/api/execute/node idempotency adjudication evidence", () => {
-            it("releases a hash+numeric-chain failure only after a conclusive verdict", async () => {
+            it("releases a hash+numeric-chain failure after a conclusive verdict", async () => {
               h.step.mockResolvedValue({ success: false, error: "reverted", transactionHash: "0xabc", chainId: 8453 });
               h.failExecution.mockResolvedValue({ status: "failed" });
               await POST(request());
@@ -217,7 +190,7 @@ jobs:
               expect(lastDisposition()).toBe("failed");
             });
 
-            it("holds a hash paired with a non-numeric chainId instead of releasing an unadjudicated transaction", async () => {
+            it("holds a hash paired with a non-numeric chainId", async () => {
               h.step.mockResolvedValue({ success: false, error: "provider error", transactionHash: "0xabc", chainId: "8453" });
               h.failExecution.mockResolvedValue({ status: "failed" });
               await POST(request());
@@ -225,7 +198,7 @@ jobs:
               expect(lastDisposition()).toBe("failed");
             });
 
-            it("forwards broadcastAttempted so a hashless post-send failure remains reconcilable", async () => {
+            it("forwards broadcastAttempted so a hashless post-send failure is reconcilable", async () => {
               h.step.mockResolvedValue({ success: false, error: "send reply lost", broadcastAttempted: true });
               h.failExecution.mockResolvedValue({ status: "unconfirmed" });
               await POST(request());
@@ -279,12 +252,11 @@ jobs:
           });
 
           describe("Solana broadcastAttempted evidence boundaries", () => {
-            it("marks raw-instruction validation failure as pre-broadcast", async () => {
+            it("marks raw-instruction validation failure pre-broadcast", async () => {
               const result = await sendRawSolanaInstructionCore({ network: "bad", instructions: [], maxSol: "0" });
               expect(result).toMatchObject({ success: false, broadcastAttempted: false });
             });
-
-            it("marks raw-instruction submit failures as potentially broadcast", async () => {
+            it("marks raw-instruction submit failures potentially broadcast", async () => {
               const result = await sendRawSolanaInstructionCore({
                 network: "solana-mainnet",
                 instructions: [{ programId: "11111111111111111111111111111111", accounts: [], data: "" }],
@@ -293,19 +265,15 @@ jobs:
               });
               expect(result).toMatchObject({ success: false, broadcastAttempted: true });
             });
-
-            it("marks Anchor validation failure as pre-broadcast", async () => {
+            it("marks Anchor validation failure pre-broadcast", async () => {
               const result = await callSolanaProgramCore({ network: "bad", programId: "x", idl: {}, instruction: "run", maxSol: "0" });
               expect(result).toMatchObject({ success: false, broadcastAttempted: false });
             });
-
-            it("marks Anchor submit failures as potentially broadcast", async () => {
+            it("marks Anchor submit failures potentially broadcast", async () => {
               const result = await callSolanaProgramCore({
                 network: "solana-mainnet",
                 programId: "11111111111111111111111111111111",
-                idl: {},
-                instruction: "run",
-                maxSol: "0",
+                idl: {}, instruction: "run", maxSol: "0",
                 _context: { organizationId: "org-1" },
               });
               expect(result).toMatchObject({ success: false, broadcastAttempted: true });
@@ -352,6 +320,7 @@ jobs:
           pnpm check
           pnpm check:api-docs
           pnpm check:api-docs
+          git diff --exit-code specs/api-coverage.json
           pnpm type-check
           pnpm type-check:executor
           git diff --check
@@ -380,16 +349,14 @@ jobs:
       - name: Final safety and scope gate
         run: |
           set -euo pipefail
-          test "$(git merge-base HEAD upstream/staging)" = "$EXPECTED_STAGING"
-          git diff --check upstream/staging...HEAD
-          ! git diff --name-only upstream/staging...HEAD | grep -q '^\.github/workflows/pr2372-review4-fix.yml$'
+          git diff --check
           grep -F 'transactionHash && chainId !== undefined' app/api/execute/node/route.ts
           grep -F 'completeParams.transactionHash && completeParams.chainId !== undefined' app/api/execute/node/route.ts
           grep -F 'broadcastAttempted,' app/api/execute/node/route.ts
           grep -F 'broadcastAttempted: true' plugins/web3/steps/send-raw-solana-instruction-core.ts
           grep -F 'broadcastAttempted: true' plugins/web3/steps/call-solana-program-core.ts
-          if git diff --name-only upstream/staging...HEAD | xargs grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- 2>/dev/null; then
-            echo '::error::Conflict marker found'
+          if git diff --name-only "$ORIGINAL_HEAD" | grep -q '^\.github/workflows/pr2372-review4-fix.yml$'; then
+            echo '::error::Temporary verifier leaked into candidate diff'
             exit 1
           fi
       - name: Commit and push verified candidate
