@@ -1,0 +1,24 @@
+name: PR2372 Review4 Rebase Push
+on:
+  push:
+    branches: [verify/pr2372-review4-rebasepush-20260916]
+permissions:
+  contents: write
+jobs:
+  rebase-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream staging
+          test "$(git rev-parse upstream/staging)" = 842ec84dc6552d1df83e40a10fa9a15a2287f45f
+          git reset --hard c4cfcfff05730787f05c4d88cc9cf41146a069f4
+          git rebase upstream/staging
+          git push --force origin HEAD:verify/pr2372-review4-candidate-20260916
+          echo RESULT=$(git rev-parse HEAD)
