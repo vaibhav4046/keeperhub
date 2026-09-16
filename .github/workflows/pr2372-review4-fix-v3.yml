@@ -1,0 +1,141 @@
+name: PR2372 Review4 Fix V3
+on:
+  push:
+    branches: [verify/pr2372-review4-fix-v3-20260916]
+permissions:
+  contents: write
+env:
+  ORIGINAL_HEAD: c4cfcfff05730787f05c4d88cc9cf41146a069f4
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: keeperhub_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/keeperhub_test
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Materialize exact reviewed fix candidate
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin verify/pr2372-review4-fix-v2-20260916
+          git show origin/verify/pr2372-review4-fix-v2-20260916:.github/workflows/pr2372-review4-fix-v2.yml > /tmp/v2.yml
+          ruby -ryaml -e 'y=YAML.safe_load(File.read("/tmp/v2.yml"), aliases: true); s=y["jobs"]["verify"]["steps"].find{|x| x["name"]=="Apply exact fixes"}; File.write("/tmp/apply.sh", s["run"])'
+          git reset --hard "$ORIGINAL_HEAD"
+          bash /tmp/apply.sh
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tests/unit/solana-broadcast-evidence.test.ts')
+          t=p.read_text()
+          if t.count('lamports:0n') != 1:
+              raise SystemExit('expected exactly one 0n test literal')
+          p.write_text(t.replace('lamports:0n','lamports:BigInt(0)',1))
+          PY
+      - uses: ./.github/actions/setup-node-pnpm
+        with:
+          discover-plugins: 'true'
+      - name: Format new regression tests
+        run: pnpm exec biome check --write --unsafe tests/unit/execute-node-idempotency-disposition.test.ts tests/unit/solana-broadcast-evidence.test.ts
+      - name: Prove regression tests kill unsafe hash-only release
+        run: |
+          set -euo pipefail
+          cp app/api/execute/node/route.ts /tmp/fixed-node
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('app/api/execute/node/route.ts')
+          t=p.read_text()
+          a='transactionHash && chainId !== undefined\n        ? dispositionForExecutionOutcome'
+          b='completeParams.transactionHash && completeParams.chainId !== undefined\n        ? dispositionForExecutionOutcome'
+          if t.count(a)!=1 or t.count(b)!=1:
+              raise SystemExit('safe guards not found exactly once')
+          t=t.replace(a,'transactionHash\n        ? dispositionForExecutionOutcome',1)
+          t=t.replace(b,'completeParams.transactionHash\n        ? dispositionForExecutionOutcome',1)
+          p.write_text(t)
+          PY
+          if pnpm exec vitest run tests/unit/execute-node-idempotency-disposition.test.ts; then
+            echo '::error::Unsafe hash-only mutation survived regression tests'
+            exit 1
+          fi
+          mv /tmp/fixed-node app/api/execute/node/route.ts
+      - name: Focused safety suite
+        run: |
+          pnpm exec vitest run \
+            tests/unit/execute-node-idempotency-disposition.test.ts \
+            tests/unit/solana-broadcast-evidence.test.ts \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/unit/idempotency.test.ts \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/transfer-spl-token.test.ts \
+            tests/unit/write-contract-core.test.ts
+      - name: Quality gates
+        run: |
+          set -euo pipefail
+          pnpm check
+          pnpm check:api-docs
+          pnpm check:api-docs
+          git diff --exit-code specs/api-coverage.json
+          pnpm type-check
+          pnpm type-check:executor
+          git diff --check
+      - name: Full unit DB integration suites
+        run: |
+          set -euo pipefail
+          pnpm test:unit __tests__ keeperhub-metrics-collector
+          pnpm db:migrate
+          pnpm test:db
+          pnpm test:integration
+      - name: Docker app build
+        uses: docker/bake-action@v7
+        env:
+          ECR_REGISTRY: ''
+          ECR_REPO: ''
+          NEXT_PUBLIC_AUTH_PROVIDERS: ''
+          NEXT_PUBLIC_GITHUB_CLIENT_ID: ''
+          NEXT_PUBLIC_GOOGLE_CLIENT_ID: ''
+          NEXT_PUBLIC_BILLING_ENABLED: ''
+          NEXT_PUBLIC_GAS_SPONSORSHIP_ENABLED: ''
+          NEXT_PUBLIC_SENTRY_DSN: ''
+        with:
+          files: docker-bake.hcl
+          targets: app
+          push: false
+      - name: Final scope and safety gate
+        run: |
+          set -euo pipefail
+          git diff --check
+          grep -F 'transactionHash && chainId !== undefined' app/api/execute/node/route.ts
+          grep -F 'completeParams.transactionHash && completeParams.chainId !== undefined' app/api/execute/node/route.ts
+          grep -F 'broadcastAttempted,' app/api/execute/node/route.ts
+          grep -F 'broadcastAttempted: true' plugins/web3/steps/send-raw-solana-instruction-core.ts
+          grep -F 'broadcastAttempted: true' plugins/web3/steps/call-solana-program-core.ts
+          test "$(git diff --name-only "$ORIGINAL_HEAD" | grep -c '^\.github/workflows/' || true)" = 0
+          if git diff --name-only "$ORIGINAL_HEAD" | xargs grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- 2>/dev/null; then
+            echo '::error::Conflict marker found'
+            exit 1
+          fi
+      - name: Commit and push verified candidate
+        run: |
+          set -euo pipefail
+          git add app/api/execute/node/route.ts \
+            plugins/web3/steps/send-raw-solana-instruction-core.ts \
+            plugins/web3/steps/call-solana-program-core.ts \
+            plugins/web3/steps/write-contract-core.ts \
+            tests/unit/execute-node-idempotency-disposition.test.ts \
+            tests/unit/solana-broadcast-evidence.test.ts
+          git commit -m 'fix: require adjudicated node evidence before release'
+          git push --force origin HEAD:verify/pr2372-review4-result-20260916
+          echo "RESULT_HEAD=$(git rev-parse HEAD)"
