@@ -1,0 +1,121 @@
+name: PR 2372 current staging final
+
+on:
+  push:
+    branches:
+      - automation/pr2372-current-staging-final-20260917
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-1840-release-key-on-definite-failure
+          fetch-depth: 0
+
+      - name: Require exact inputs and apply hardening
+        run: |
+          set -euo pipefail
+          old_head=c4cfcfff05730787f05c4d88cc9cf41146a069f4
+          staging=b79f9009a79b07d571f6322dd190fae72da2fdc3
+          test "$(git rev-parse HEAD)" = "$old_head"
+          test "$(git ls-remote origin refs/heads/fix/issue-1840-release-key-on-definite-failure | cut -f1)" = "$old_head"
+          test "$(git ls-remote https://github.com/KeeperHub/keeperhub.git refs/heads/staging | cut -f1)" = "$staging"
+          git fetch origin automation/pr2372-final-hardening-20260917
+          python <<'PY'
+          import subprocess, textwrap
+          from pathlib import Path
+          source = subprocess.check_output(
+              ["git", "show", "0143a926edbece4e9916623004cb57c9f604560e:.github/workflows/pr2372-final-hardening.yml"], text=True
+          )
+          start_marker = "          python <<'PY'\n"
+          end_marker = "          PY\n\n          git diff --check"
+          start = source.index(start_marker) + len(start_marker)
+          end = source.index(end_marker, start)
+          Path("/tmp/harden.py").write_text(textwrap.dedent(source[start:end]))
+          subprocess.run(["python", "/tmp/harden.py"], check=True)
+          PY
+          git diff --check
+          git config user.name "Vaibhav Lalwani"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git add \
+            app/api/execute/node/route.ts \
+            app/api/execute/_lib/execution-service.ts \
+            plugins/web3/steps/send-raw-solana-instruction-core.ts \
+            plugins/web3/steps/call-solana-program-core.ts \
+            plugins/web3/steps/write-contract-core.ts \
+            tests/integration/execute-node-reserved-fields.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/send-raw-solana-instruction.test.ts \
+            tests/unit/call-solana-program.test.ts
+          git commit -m "fix: close final idempotency review gaps"
+
+      - name: Rebase onto exact current staging
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream b79f9009a79b07d571f6322dd190fae72da2fdc3
+          git rebase b79f9009a79b07d571f6322dd190fae72da2fdc3
+          test "$(git merge-base HEAD b79f9009a79b07d571f6322dd190fae72da2fdc3)" = "b79f9009a79b07d571f6322dd190fae72da2fdc3"
+          git diff --check b79f9009a79b07d571f6322dd190fae72da2fdc3...HEAD
+          test -z "$(git diff --name-only --diff-filter=U)"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install and discover
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm discover-plugins
+
+      - name: Focused safety regressions
+        run: |
+          pnpm exec vitest run \
+            tests/integration/execute-node-reserved-fields.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/send-raw-solana-instruction.test.ts \
+            tests/unit/call-solana-program.test.ts \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/unit/idempotency.test.ts \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/transfer-spl-token.test.ts \
+            tests/unit/write-contract-core.test.ts
+
+      - name: Typecheck and repository check
+        run: |
+          pnpm type-check
+          pnpm check
+
+      - name: API docs stability
+        run: |
+          set -euo pipefail
+          pnpm check:api-docs
+          before="$(git diff -- specs/api-coverage.json | sha256sum | cut -d' ' -f1)"
+          pnpm check:api-docs
+          after="$(git diff -- specs/api-coverage.json | sha256sum | cut -d' ' -f1)"
+          test "$before" = "$after"
+          git diff --check
+
+      - name: Commit generated coverage if any and publish candidate
+        run: |
+          set -euo pipefail
+          test ! -e .github/workflows/pr2372-current-staging-final.yml
+          git add specs/api-coverage.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: refresh API coverage after staging rebase"
+          fi
+          test "$(git merge-base HEAD b79f9009a79b07d571f6322dd190fae72da2fdc3)" = "b79f9009a79b07d571f6322dd190fae72da2fdc3"
+          git diff --check b79f9009a79b07d571f6322dd190fae72da2fdc3...HEAD
+          git status --short
+          git push --force origin HEAD:automation/pr2372-current-staging-final-result-20260917
