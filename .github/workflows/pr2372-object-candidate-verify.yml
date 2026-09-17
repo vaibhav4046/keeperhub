@@ -15,14 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 94fd6541a8f824478cc78e8eee595b609e3aa2e0
+          ref: 9b8679d77cd2dcb890af6163a931f1974e4fb176
           fetch-depth: 0
 
       - name: Pin exact candidate and base
         run: |
           set -euo pipefail
-          candidate=94fd6541a8f824478cc78e8eee595b609e3aa2e0
-          base=b79f9009a79b07d571f6322dd190fae72da2fdc3
+          candidate=9b8679d77cd2dcb890af6163a931f1974e4fb176
+          base=954601ca9e7194b52bcd7b0775fcdf68931788a7
           test "$(git rev-parse HEAD)" = "$candidate"
           test "$(git merge-base "$base" HEAD)" = "$base"
           test "$(git rev-list --count HEAD.."$base")" = "0"
@@ -112,7 +112,7 @@ jobs:
       - name: Biome and diff safety
         run: |
           set -euo pipefail
-          base=b79f9009a79b07d571f6322dd190fae72da2fdc3
+          base=954601ca9e7194b52bcd7b0775fcdf68931788a7
           mapfile -t changed < <(git diff --name-only "$base" HEAD)
           pnpm exec biome check "${changed[@]}"
           git diff --check "$base" HEAD
