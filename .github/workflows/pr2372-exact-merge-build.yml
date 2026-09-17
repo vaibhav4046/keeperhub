@@ -17,6 +17,7 @@ jobs:
         with:
           repository: KeeperHub/keeperhub
           ref: 79bc376b8c674552d07e78c14c1738831d22e770
+          fetch-depth: 0
       - name: Verify exact synthetic merge
         run: |
           set -euo pipefail
@@ -26,7 +27,6 @@ jobs:
           git diff --check 7104df9db8d2f171731185c6349855b59136e147...HEAD
       - uses: docker/setup-buildx-action@v4
       - name: Build exact synthetic merge tree
-        uses: docker/bake-action@v7
         env:
           ECR_REGISTRY: ''
           ECR_REPO: ''
@@ -36,8 +36,7 @@ jobs:
           NEXT_PUBLIC_BILLING_ENABLED: ''
           NEXT_PUBLIC_GAS_SPONSORSHIP_ENABLED: ''
           NEXT_PUBLIC_SENTRY_DSN: ''
-        with:
-          source: https://github.com/KeeperHub/keeperhub.git#79bc376b8c674552d07e78c14c1738831d22e770
-          files: docker-bake.hcl
-          targets: app
-          push: false
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "79bc376b8c674552d07e78c14c1738831d22e770"
+          docker buildx bake --file docker-bake.hcl app
