@@ -1,0 +1,263 @@
+name: PR 2372 final hardening
+
+on:
+  push:
+    branches:
+      - automation/pr2372-final-hardening-20260917
+
+permissions:
+  contents: write
+
+jobs:
+  harden-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-1840-release-key-on-definite-failure
+          fetch-depth: 0
+
+      - name: Require expected feature head
+        run: |
+          set -euo pipefail
+          expected=c4cfcfff05730787f05c4d88cc9cf41146a069f4
+          test "$(git rev-parse HEAD)" = "$expected"
+          remote_head="$(git ls-remote origin refs/heads/fix/issue-1840-release-key-on-definite-failure | cut -f1)"
+          test "$remote_head" = "$expected"
+
+      - name: Apply review hardening
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Node route: only release after an actually adjudicable hash+chain pair,
+          # and propagate broadcast evidence so hashless attempted sends reconcile.
+          replace_once(
+              "app/api/execute/node/route.ts",
+              '''    const chainId =\n      output && typeof output.chainId === "number" ? output.chainId : undefined;\n    const settled = await failExecution(executionId, errorMsg, {\n      transactionHash,\n      chainId,\n    });\n    // Only a hash lets failExecution adjudicate anything: with one, its verdict\n    // decides the key (conclusive failure releases, unreadable holds). Without\n    // one it answers "failed" from the mere absence of a hash, and on this route\n    // that is not evidence -- unlike the chain-write routes, an arbitrary step\n    // here may have had a side effect (a message sent, a webhook delivered)\n    // before it reported failure. Hold the key in that case.\n    const disposition = transactionHash\n      ? dispositionForExecutionOutcome(settled.status, { transactionHash })\n      : "failed";''',
+              '''    const chainId =\n      output && typeof output.chainId === "number" ? output.chainId : undefined;\n    const broadcastAttempted =\n      output && typeof output.broadcastAttempted === "boolean"\n        ? output.broadcastAttempted\n        : undefined;\n    const settled = await failExecution(executionId, errorMsg, {\n      transactionHash,\n      chainId,\n      broadcastAttempted,\n    });\n    // A hash is only adjudicable together with its numeric chain id. Without\n    // that pair, failExecution cannot verify a receipt and this arbitrary node\n    // may already have produced a side effect, so the idempotency key stays\n    // held. broadcastAttempted is still forwarded above so a hashless attempted\n    // chain send becomes unconfirmed/reconcilable instead of terminal.\n    const disposition =\n      transactionHash && chainId !== undefined\n        ? dispositionForExecutionOutcome(settled.status, { transactionHash })\n        : "failed";'''
+          )
+          replace_once(
+              "app/api/execute/node/route.ts",
+              '''    // Mirror the failure branch above: a non-completed verification outcome is\n    // only safe to map through the shared rule when a transaction hash existed\n    // to adjudicate. This invariant currently follows from isTransactionResult,\n    // but keeping the guard here makes the safety boundary local and pinned.\n    const disposition = completeParams.transactionHash\n      ? dispositionForExecutionOutcome(outcome.status, {\n          transactionHash: completeParams.transactionHash,\n        })\n      : "failed";''',
+              '''    // Mirror the failure branch above: only a hash+chain pair could have been\n    // independently verified by completeExecution. A hash without a numeric\n    // chain id is evidence of a possible send, not evidence of a conclusive\n    // failure, so keep the key held.\n    const disposition =\n      completeParams.transactionHash && completeParams.chainId !== undefined\n        ? dispositionForExecutionOutcome(outcome.status, {\n            transactionHash: completeParams.transactionHash,\n          })\n        : "failed";'''
+          )
+
+          # Root hardening: failExecution itself also treats hash-without-chain as
+          # unconfirmed, so future callers cannot turn missing verification data
+          # into a terminal failure by accident.
+          replace_once(
+              "app/api/execute/_lib/execution-service.ts",
+              '''  // A hash without a `chainId` cannot be verified, so it would fall through and\n  // be adjudicated as a definite failure on the strength of the missing field\n  // alone -- the same shape that makes the `unconfirmed` return in\n  // `completeExecution` load-bearing. It is not guarded symmetrically here\n  // because no producer of that shape reaches this function: every hash-bearing\n  // failure return across the four chain-write routes and `plugins/*/steps/*.ts`\n  // pairs the hash with a numeric `chainId` in the same ternary. That is a\n  // convention, not a type -- `FailParams` permits the pair to come apart, and\n  // the first caller that separates them would be adjudicated on absence.''',
+              '''  // A hash without a `chainId` cannot be verified. Fail closed here as well as\n  // at route disposition call sites: `FailParams` permits the pair to come apart,\n  // and missing verification data must never be treated as proof of a conclusive\n  // failure. Such a row remains unconfirmed until reconciliation can adjudicate\n  // it with enough chain context.'''
+          )
+          replace_once(
+              "app/api/execute/_lib/execution-service.ts",
+              '''  const hashlessAttemptStillInFlight =\n    params.broadcastAttempted === true && !params.transactionHash;\n  const status =\n    hashlessAttemptStillInFlight ||\n    (receipts.length > 0 &&''',
+              '''  const hashlessAttemptStillInFlight =\n    params.broadcastAttempted === true && !params.transactionHash;\n  const hashWithoutChainContext =\n    Boolean(params.transactionHash) && params.chainId === undefined;\n  const status =\n    hashlessAttemptStillInFlight ||\n    hashWithoutChainContext ||\n    (receipts.length > 0 &&'''
+          )
+
+          # The two Solana instruction cores were the remaining broadcasting
+          # cores without explicit evidence. Their wrappers mark every early
+          # failure pre-broadcast; the submit catch marks the ambiguous send path.
+          replace_once(
+              "plugins/web3/steps/send-raw-solana-instruction-core.ts",
+              '''  | { success: false; error: string };''',
+              '''  | { success: false; error: string; broadcastAttempted?: boolean };'''
+          )
+          replace_once(
+              "plugins/web3/steps/send-raw-solana-instruction-core.ts",
+              '''export async function sendRawSolanaInstructionCore(\n  input: SendRawSolanaInstructionCoreInput\n): Promise<SendRawSolanaInstructionResult> {''',
+              '''async function sendRawSolanaInstructionCoreImpl(\n  input: SendRawSolanaInstructionCoreInput\n): Promise<SendRawSolanaInstructionResult> {'''
+          )
+          replace_once(
+              "plugins/web3/steps/send-raw-solana-instruction-core.ts",
+              '''    return { success: false, error: getErrorMessage(error) };\n  }\n}''',
+              '''    return {\n      success: false,\n      error: getErrorMessage(error),\n      broadcastAttempted: true,\n    };\n  }\n}\n\n/**\n * Marks every failure returned before submit as definite pre-broadcast evidence.\n * Any path after submit begins must set broadcastAttempted itself, otherwise the\n * wrapper would incorrectly convert an ambiguous send into releasable evidence.\n */\nexport async function sendRawSolanaInstructionCore(\n  input: SendRawSolanaInstructionCoreInput\n): Promise<SendRawSolanaInstructionResult> {\n  const result = await sendRawSolanaInstructionCoreImpl(input);\n  if (result.success || result.broadcastAttempted !== undefined) {\n    return result;\n  }\n  return { ...result, broadcastAttempted: false };\n}'''
+          )
+
+          replace_once(
+              "plugins/web3/steps/call-solana-program-core.ts",
+              '''  | { success: false; error: string };''',
+              '''  | { success: false; error: string; broadcastAttempted?: boolean };'''
+          )
+          replace_once(
+              "plugins/web3/steps/call-solana-program-core.ts",
+              '''export async function callSolanaProgramCore(\n  input: CallSolanaProgramCoreInput\n): Promise<CallSolanaProgramResult> {''',
+              '''async function callSolanaProgramCoreImpl(\n  input: CallSolanaProgramCoreInput\n): Promise<CallSolanaProgramResult> {'''
+          )
+          replace_once(
+              "plugins/web3/steps/call-solana-program-core.ts",
+              '''    return { success: false, error: getErrorMessage(error) };\n  }\n}''',
+              '''    return {\n      success: false,\n      error: getErrorMessage(error),\n      broadcastAttempted: true,\n    };\n  }\n}\n\n/**\n * Marks every failure returned before submit as definite pre-broadcast evidence.\n * Any path after submit begins must set broadcastAttempted itself, otherwise the\n * wrapper would incorrectly convert an ambiguous send into releasable evidence.\n */\nexport async function callSolanaProgramCore(\n  input: CallSolanaProgramCoreInput\n): Promise<CallSolanaProgramResult> {\n  const result = await callSolanaProgramCoreImpl(input);\n  if (result.success || result.broadcastAttempted !== undefined) {\n    return result;\n  }\n  return { ...result, broadcastAttempted: false };\n}'''
+          )
+
+          # Pin the caller-supplied ABI safety boundary and the wrapper invariant.
+          replace_once(
+              "plugins/web3/steps/write-contract-core.ts",
+              '''      const rejection = classifyRevert(error, contractInterface);''',
+              '''      // Deliberately classify only against the contract's declared interface.\n      // `errorAbis` is caller-supplied and is used only for human-readable error\n      // formatting below; feeding it into classifyRevert could turn an arbitrary\n      // post-broadcast error into `rejection`, stamp broadcastAttempted=false, and\n      // make a live transaction look safe to retry.\n      const rejection = classifyRevert(error, contractInterface);'''
+          )
+          replace_once(
+              "plugins/web3/steps/write-contract-core.ts",
+              '''/** Explicitly marks every hashless early return as pre-broadcast evidence. */''',
+              '''/**\n * Explicitly marks every hashless early return as pre-broadcast evidence. This\n * intentionally overrides the disposition layer's fail-closed missing-evidence\n * default, so every future return after a send begins must set a hash or\n * broadcastAttempted itself rather than falling through this wrapper.\n */'''
+          )
+
+          # Node integration tests capture the actual disposition and pin both
+          # call sites plus the malformed chainId boundary.
+          replace_once(
+              "tests/integration/execute-node-reserved-fields.test.ts",
+              '''  capturedInput: undefined as Record<string, unknown> | undefined,\n}));''',
+              '''  capturedInput: undefined as Record<string, unknown> | undefined,\n  recordIdempotentResponse: vi.fn(),\n}));'''
+          )
+          replace_once(
+              "tests/integration/execute-node-reserved-fields.test.ts",
+              '''vi.mock("@/app/api/execute/_lib/action-resolver", () => ({\n  resolveAction: mocks.resolveAction,\n}));''',
+              '''vi.mock("@/app/api/execute/_lib/action-resolver", () => ({\n  resolveAction: mocks.resolveAction,\n}));\n\nvi.mock("@/lib/idempotency", async (importActual) => {\n  const actual = await importActual<typeof import("@/lib/idempotency")>();\n  return {\n    ...actual,\n    recordIdempotentResponse: mocks.recordIdempotentResponse,\n  };\n});'''
+          )
+          replace_once(
+              "tests/integration/execute-node-reserved-fields.test.ts",
+              '''  mocks.redactInput.mockImplementation(\n    (input: Record<string, unknown>) => input\n  );''',
+              '''  mocks.redactInput.mockImplementation(\n    (input: Record<string, unknown>) => input\n  );\n  mocks.recordIdempotentResponse.mockImplementation(\n    (_outcome: unknown, response: Response) => Promise.resolve(response)\n  );'''
+          )
+          replace_once(
+              "tests/integration/execute-node-reserved-fields.test.ts",
+              '''      transactionHash: "0xpending",\n      chainId: 1,\n    });''',
+              '''      transactionHash: "0xpending",\n      chainId: 1,\n      broadcastAttempted: true,\n    });'''
+          )
+          replace_once(
+              "tests/integration/execute-node-reserved-fields.test.ts",
+              '''      expect.objectContaining({ transactionHash: "0xpending", chainId: 1 })\n    );''',
+              '''      expect.objectContaining({\n        transactionHash: "0xpending",\n        chainId: 1,\n        broadcastAttempted: true,\n      })\n    );'''
+          )
+          replace_once(
+              "tests/integration/execute-node-reserved-fields.test.ts",
+              '''  it("still reports a pre-broadcast failure as terminal with no hash", async () => {\n    mocks.stepFn.mockResolvedValue({\n      success: false,\n      error: "insufficient funds",\n    });\n\n    const response = await nodePOST(\n      postRequest({\n        actionType: "web3/write-contract",\n        config: { network: "1", contractAddress: "0xabc" },\n      })\n    );\n\n    expect(response.status).toBe(422);\n    const body = (await response.json()) as Record<string, unknown>;\n    expect(body.status).toBe("failed");\n    expect(body.transactionHash).toBeUndefined();\n  });\n});''',
+              '''  it("still reports a pre-broadcast failure as terminal with no hash", async () => {\n    mocks.stepFn.mockResolvedValue({\n      success: false,\n      error: "insufficient funds",\n    });\n\n    const response = await nodePOST(\n      postRequest({\n        actionType: "web3/write-contract",\n        config: { network: "1", contractAddress: "0xabc" },\n      })\n    );\n\n    expect(response.status).toBe(422);\n    const body = (await response.json()) as Record<string, unknown>;\n    expect(body.status).toBe("failed");\n    expect(body.transactionHash).toBeUndefined();\n  });\n\n  it("releases a failed node transaction only after hash+chain adjudication", async () => {\n    mocks.stepFn.mockResolvedValue({\n      success: false,\n      error: "execution reverted",\n      transactionHash: "0xreverted",\n      chainId: 8453,\n    });\n    mocks.failExecution.mockResolvedValue({ status: "failed" });\n\n    await nodePOST(\n      postRequest({\n        actionType: "web3/write-contract",\n        config: { network: "8453", contractAddress: "0xabc" },\n      })\n    );\n\n    expect(mocks.recordIdempotentResponse.mock.calls.at(-1)?.[2]).toBe(\n      "release"\n    );\n  });\n\n  it("holds a failed node transaction while receipt verification is unconfirmed", async () => {\n    mocks.stepFn.mockResolvedValue({\n      success: false,\n      error: "receipt unavailable",\n      transactionHash: "0xpending",\n      chainId: 8453,\n    });\n    mocks.failExecution.mockResolvedValue({ status: "unconfirmed" });\n\n    await nodePOST(\n      postRequest({\n        actionType: "web3/write-contract",\n        config: { network: "8453", contractAddress: "0xabc" },\n      })\n    );\n\n    expect(mocks.recordIdempotentResponse.mock.calls.at(-1)?.[2]).toBe(\n      "failed"\n    );\n  });\n\n  it("holds a hash when chainId is not numeric instead of releasing it", async () => {\n    mocks.stepFn.mockResolvedValue({\n      success: false,\n      error: "provider returned malformed chain context",\n      transactionHash: "0xlive",\n      chainId: "8453",\n    });\n    mocks.failExecution.mockResolvedValue({ status: "failed" });\n\n    await nodePOST(\n      postRequest({\n        actionType: "web3/write-contract",\n        config: { network: "8453", contractAddress: "0xabc" },\n      })\n    );\n\n    expect(mocks.failExecution).toHaveBeenCalledWith(\n      "ex1",\n      "provider returned malformed chain context",\n      expect.objectContaining({ transactionHash: "0xlive", chainId: undefined })\n    );\n    expect(mocks.recordIdempotentResponse.mock.calls.at(-1)?.[2]).toBe(\n      "failed"\n    );\n  });\n\n  it("releases the non-completed success branch only after hash+chain adjudication", async () => {\n    mocks.stepFn.mockResolvedValue({\n      success: true,\n      transactionHash: "0xreverted",\n      gasUsed: "21000",\n      effectiveGasPrice: "1",\n      chainId: 8453,\n    });\n    mocks.completeExecution.mockResolvedValue({ status: "failed" });\n\n    await nodePOST(\n      postRequest({\n        actionType: "web3/write-contract",\n        config: { network: "8453", contractAddress: "0xabc" },\n      })\n    );\n\n    expect(mocks.recordIdempotentResponse.mock.calls.at(-1)?.[2]).toBe(\n      "release"\n    );\n  });\n\n  it("holds the non-completed success branch while verification is unconfirmed", async () => {\n    mocks.stepFn.mockResolvedValue({\n      success: true,\n      transactionHash: "0xpending",\n      gasUsed: "21000",\n      effectiveGasPrice: "1",\n      chainId: 8453,\n    });\n    mocks.completeExecution.mockResolvedValue({ status: "unconfirmed" });\n\n    await nodePOST(\n      postRequest({\n        actionType: "web3/write-contract",\n        config: { network: "8453", contractAddress: "0xabc" },\n      })\n    );\n\n    expect(mocks.recordIdempotentResponse.mock.calls.at(-1)?.[2]).toBe(\n      "failed"\n    );\n  });\n});'''
+          )
+
+          # Execution-service regression: hash without chain context is itself
+          # unconfirmed and never reaches receipt verification.
+          replace_once(
+              "tests/unit/execution-service-safe-inner-failure.test.ts",
+              '''  it("keeps safe_inner_failure unconfirmed because the outer Safe transaction consumed its nonce", async () => {''',
+              '''  it("keeps a hash without chain context unconfirmed", async () => {\n    const outcome = await failExecution("exec_1", "chain context missing", {\n      transactionHash: "0xunknown",\n    });\n\n    expect(outcome).toEqual({ status: "unconfirmed" });\n    expect(mocks.verifyExecutionReceipts).not.toHaveBeenCalled();\n    expect(mocks.set).toHaveBeenCalledWith(\n      expect.objectContaining({ status: "unconfirmed", completedAt: null })\n    );\n  });\n\n  it("keeps safe_inner_failure unconfirmed because the outer Safe transaction consumed its nonce", async () => {'''
+          )
+
+          # Solana tests pin both sides of the evidence wrapper.
+          replace_once(
+              "tests/unit/send-raw-solana-instruction.test.ts",
+              '''    expect(result).toEqual({\n      success: false,\n      error: expect.stringContaining("maxSol is required"),\n    });''',
+              '''    expect(result).toEqual({\n      success: false,\n      error: expect.stringContaining("maxSol is required"),\n      broadcastAttempted: false,\n    });'''
+          )
+          replace_once(
+              "tests/unit/send-raw-solana-instruction.test.ts",
+              '''    expect(result).toEqual({\n      success: false,\n      error: "At least one instruction is required",\n    });''',
+              '''    expect(result).toEqual({\n      success: false,\n      error: "At least one instruction is required",\n      broadcastAttempted: false,\n    });'''
+          )
+          replace_once(
+              "tests/unit/send-raw-solana-instruction.test.ts",
+              '''    expect(result).toMatchObject({ success: false });\n    expect((result as { error: string }).error).toContain("Simulation failed");\n  });''',
+              '''    expect(result).toMatchObject({\n      success: false,\n      broadcastAttempted: true,\n    });\n    expect((result as { error: string }).error).toContain("Simulation failed");\n  });'''
+          )
+
+          replace_once(
+              "tests/unit/call-solana-program.test.ts",
+              '''    expect(result).toEqual({\n      success: false,\n      error: expect.stringContaining("maxSol is required"),\n    });''',
+              '''    expect(result).toEqual({\n      success: false,\n      error: expect.stringContaining("maxSol is required"),\n      broadcastAttempted: false,\n    });'''
+          )
+          replace_once(
+              "tests/unit/call-solana-program.test.ts",
+              '''  it("requires an execution or organization context", async () => {\n    const result = await callSolanaProgramCore({\n      ...validInput,\n      _context: undefined,\n    });\n\n    expect(result).toMatchObject({ success: false });\n    expect((result as { error: string }).error).toContain(\n      "Execution ID or organization ID is required"\n    );\n  });\n});''',
+              '''  it("requires an execution or organization context", async () => {\n    const result = await callSolanaProgramCore({\n      ...validInput,\n      _context: undefined,\n    });\n\n    expect(result).toMatchObject({\n      success: false,\n      broadcastAttempted: false,\n    });\n    expect((result as { error: string }).error).toContain(\n      "Execution ID or organization ID is required"\n    );\n  });\n\n  it("marks a submit failure as an attempted broadcast", async () => {\n    mockAdapter.sendTransaction.mockRejectedValue(new Error("RPC unavailable"));\n\n    const result = await callSolanaProgramCore(validInput);\n\n    expect(result).toMatchObject({\n      success: false,\n      broadcastAttempted: true,\n      error: expect.stringContaining("RPC unavailable"),\n    });\n  });\n});'''
+          )
+          PY
+
+          git diff --check
+          git diff --stat
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Discover plugins
+        run: pnpm discover-plugins
+
+      - name: Verify focused behavior
+        run: |
+          pnpm exec vitest run \
+            tests/integration/execute-node-reserved-fields.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/send-raw-solana-instruction.test.ts \
+            tests/unit/call-solana-program.test.ts \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/unit/idempotency.test.ts \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/transfer-spl-token.test.ts \
+            tests/unit/write-contract-core.test.ts
+
+      - name: Typecheck
+        run: pnpm type-check
+
+      - name: API docs consistency twice
+        run: |
+          set -euo pipefail
+          pnpm check:api-docs
+          before="$(git diff -- specs/api-coverage.json | sha256sum | cut -d' ' -f1)"
+          pnpm check:api-docs
+          after="$(git diff -- specs/api-coverage.json | sha256sum | cut -d' ' -f1)"
+          test "$before" = "$after"
+
+      - name: Biome and diff safety
+        run: |
+          pnpm exec biome check \
+            app/api/execute/node/route.ts \
+            app/api/execute/_lib/execution-service.ts \
+            plugins/web3/steps/send-raw-solana-instruction-core.ts \
+            plugins/web3/steps/call-solana-program-core.ts \
+            plugins/web3/steps/write-contract-core.ts \
+            tests/integration/execute-node-reserved-fields.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/send-raw-solana-instruction.test.ts \
+            tests/unit/call-solana-program.test.ts
+          git diff --check
+          ! git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- . ':!pnpm-lock.yaml'
+
+      - name: Commit verified result branch
+        run: |
+          set -euo pipefail
+          test ! -e .github/workflows/pr2372-final-hardening.yml
+          git config user.name "Vaibhav Lalwani"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git add \
+            app/api/execute/node/route.ts \
+            app/api/execute/_lib/execution-service.ts \
+            plugins/web3/steps/send-raw-solana-instruction-core.ts \
+            plugins/web3/steps/call-solana-program-core.ts \
+            plugins/web3/steps/write-contract-core.ts \
+            tests/integration/execute-node-reserved-fields.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/send-raw-solana-instruction.test.ts \
+            tests/unit/call-solana-program.test.ts \
+            specs/api-coverage.json
+          git commit -m "fix: close final idempotency review gaps"
+          git push --force origin HEAD:automation/pr2372-final-hardening-result-20260917
