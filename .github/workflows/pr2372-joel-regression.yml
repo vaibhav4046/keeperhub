@@ -1,0 +1,56 @@
+name: PR2372 Joel Regression Verification
+
+on:
+  push:
+    branches:
+      - verify/pr2372-joel-regression-20260917
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: verify/pr2372-joel-regression-20260917
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install and discover
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm discover-plugins
+      - name: Green regression test
+        run: pnpm exec vitest run tests/unit/tempo-release-held-payment.test.ts tests/unit/tempo-broadcast-route.test.ts tests/unit/transfer-spl-token.test.ts
+      - name: Mutation must be caught
+        run: |
+          set -euo pipefail
+          cp lib/tempo/release-held-payment.ts /tmp/release-held-payment.ts
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('lib/tempo/release-held-payment.ts')
+          s = p.read_text()
+          old = 'if (isOnChainPendingError(error)) {'
+          new = 'if (false && isOnChainPendingError(error)) {'
+          assert old in s
+          p.write_text(s.replace(old, new, 1))
+          PY
+          if pnpm exec vitest run tests/unit/tempo-release-held-payment.test.ts; then
+            echo '::error::Pending-error mutation survived regression test'
+            exit 1
+          fi
+          mv /tmp/release-held-payment.ts lib/tempo/release-held-payment.ts
+          pnpm exec vitest run tests/unit/tempo-release-held-payment.test.ts
+      - name: Static verification
+        run: |
+          set -euo pipefail
+          pnpm type-check
+          pnpm exec biome check tests/unit/tempo-release-held-payment.test.ts lib/tempo/release-held-payment.ts app/api/tempo/held-payments/'[id]'/broadcast/route.ts plugins/web3/steps/transfer-spl-token-core.ts
+          git diff --check
