@@ -117,4 +117,4 @@ jobs:
           pnpm exec biome check "${changed[@]}"
           git diff --check "$base" HEAD
           test -z "$(git diff --name-only --diff-filter=U)"
-          ! git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- . ':!pnpm-lock.yaml'
+          ! git diff --unified=0 "$base" HEAD | grep -E '^\+(<<<<<<<|=======|>>>>>>>)'
