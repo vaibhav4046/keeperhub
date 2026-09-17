@@ -71,10 +71,7 @@ describe("releaseHeldPaymentNow broadcast evidence", () => {
       userId: "user-1",
     });
 
-    expect(broker.markBroadcast).toHaveBeenCalledWith(
-      "payment-1",
-      "0xpending"
-    );
+    expect(broker.markBroadcast).toHaveBeenCalledWith("payment-1", "0xpending");
     expect(broker.markFailed).not.toHaveBeenCalled();
     expect(result).toEqual({
       ok: false,
