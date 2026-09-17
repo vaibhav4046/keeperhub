@@ -1,0 +1,240 @@
+name: PR2372 Final Current Staging Verification
+
+on:
+  push:
+    branches:
+      - verify/pr2372-final-current-staging-20260917b
+
+permissions:
+  contents: read
+
+env:
+  FEATURE_SHA: 125536345b347c9cf5da4da279b4c883cd09ceed
+  STAGING_SHA: 7104df9db8d2f171731185c6349855b59136e147
+
+jobs:
+  check-title:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          set -euo pipefail
+          title='fix: #1840 release the idempotency key on a definite failure'
+          printf '%s' "$title" | grep -qiE '^(feat|fix|bug|hotfix|breaking|chore|docs|refactor|test|ci|build|perf|style|release)(\([^)]*\))?[!]?:[[:space:]].+'
+
+  diff-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '125536345b347c9cf5da4da279b4c883cd09ceed', fetch-depth: 0 }
+      - name: Merge exact staging and inspect
+        run: |
+          set -euo pipefail
+          git config user.name verifier
+          git config user.email verifier@users.noreply.github.com
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream "$STAGING_SHA"
+          git merge --no-edit "$STAGING_SHA"
+          git diff --check "$STAGING_SHA...HEAD"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          files=$(git diff --name-only "$STAGING_SHA...HEAD")
+          if [ -n "$files" ] && printf '%s\n' "$files" | xargs grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- 2>/dev/null; then exit 1; fi
+          test ! -e .github/workflows/pr2372-final-current-staging-b.yml
+
+  focused-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '125536345b347c9cf5da4da279b4c883cd09ceed', fetch-depth: 0 }
+      - name: Merge exact staging
+        run: |
+          git config user.name verifier; git config user.email verifier@users.noreply.github.com
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream "$STAGING_SHA"; git merge --no-edit "$STAGING_SHA"
+      - uses: pnpm/action-setup@v4
+        with: { version: '10.34.5' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile && pnpm discover-plugins
+      - name: Run complete idempotency safety regression set
+        run: |
+          pnpm exec vitest run \
+            tests/unit/tempo-release-held-payment.test.ts \
+            tests/unit/tempo-broadcast-route.test.ts \
+            tests/integration/execute-node-reserved-fields.test.ts \
+            tests/unit/send-raw-solana-instruction.test.ts \
+            tests/unit/call-solana-program.test.ts \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/unit/idempotency.test.ts \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/transfer-spl-token.test.ts \
+            tests/unit/write-contract-core.test.ts
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '125536345b347c9cf5da4da279b4c883cd09ceed', fetch-depth: 0 }
+      - run: |
+          git config user.name verifier; git config user.email verifier@users.noreply.github.com
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream "$STAGING_SHA"; git merge --no-edit "$STAGING_SHA"
+      - uses: pnpm/action-setup@v4
+        with: { version: '10.34.5' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile && pnpm discover-plugins
+      - run: pnpm check
+      - name: API docs stable
+        run: |
+          set -euo pipefail
+          pnpm check:api-docs
+          git diff --exit-code specs/api-coverage.json
+          pnpm check:api-docs
+          git diff --exit-code specs/api-coverage.json
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '125536345b347c9cf5da4da279b4c883cd09ceed', fetch-depth: 0 }
+      - run: |
+          git config user.name verifier; git config user.email verifier@users.noreply.github.com
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream "$STAGING_SHA"; git merge --no-edit "$STAGING_SHA"
+      - uses: pnpm/action-setup@v4
+        with: { version: '10.34.5' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile && pnpm discover-plugins
+      - run: pnpm type-check
+      - run: pnpm type-check:executor
+
+  test-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '125536345b347c9cf5da4da279b4c883cd09ceed', fetch-depth: 0 }
+      - run: |
+          git config user.name verifier; git config user.email verifier@users.noreply.github.com
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream "$STAGING_SHA"; git merge --no-edit "$STAGING_SHA"
+      - uses: pnpm/action-setup@v4
+        with: { version: '10.34.5' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile && pnpm discover-plugins
+      - run: pnpm test:unit __tests__ keeperhub-metrics-collector
+
+  test-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '125536345b347c9cf5da4da279b4c883cd09ceed', fetch-depth: 0 }
+      - run: |
+          git config user.name verifier; git config user.email verifier@users.noreply.github.com
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream "$STAGING_SHA"; git merge --no-edit "$STAGING_SHA"
+      - uses: pnpm/action-setup@v4
+        with: { version: '10.34.5' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile && pnpm discover-plugins
+      - run: pnpm test:integration
+
+  test-db:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: keeperhub_test }
+        ports: [ '5432:5432' ]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/keeperhub_test
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '125536345b347c9cf5da4da279b4c883cd09ceed', fetch-depth: 0 }
+      - run: |
+          git config user.name verifier; git config user.email verifier@users.noreply.github.com
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream "$STAGING_SHA"; git merge --no-edit "$STAGING_SHA"
+      - uses: pnpm/action-setup@v4
+        with: { version: '10.34.5' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile && pnpm discover-plugins
+      - run: pnpm db:migrate
+      - run: pnpm test:db
+
+  migrate-check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: keeperhub_test }
+        ports: [ '5432:5432' ]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/keeperhub_test
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '125536345b347c9cf5da4da279b4c883cd09ceed', fetch-depth: 0 }
+      - run: |
+          git config user.name verifier; git config user.email verifier@users.noreply.github.com
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream "$STAGING_SHA"; git merge --no-edit "$STAGING_SHA"
+          relevant=$(git diff --name-only "$STAGING_SHA...HEAD" | grep -E '^(drizzle/|lib/db/schema)' || true)
+          if [ -z "$relevant" ]; then echo 'No migration-relevant PR changes'; exit 0; fi
+      - uses: pnpm/action-setup@v4
+        with: { version: '10.34.5' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:setup-workflow && pnpm db:migrate
+
+  db-prep-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '125536345b347c9cf5da4da279b4c883cd09ceed', fetch-depth: 0 }
+      - run: |
+          set -euo pipefail
+          git config user.name verifier; git config user.email verifier@users.noreply.github.com
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream "$STAGING_SHA"; git merge --no-edit "$STAGING_SHA"
+          found=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue; [ -f "$f" ] || continue
+            if head -n 5 "$f" | grep -qE '^[[:space:]]*--[[:space:]]*@requires-db-prep([[:space:]]|$)'; then found=true; fi
+          done < <(git diff --name-only --diff-filter=AM "$STAGING_SHA...HEAD" -- 'drizzle/*.sql')
+          test "$found" = false
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '125536345b347c9cf5da4da279b4c883cd09ceed', fetch-depth: 0 }
+      - run: |
+          git config user.name verifier; git config user.email verifier@users.noreply.github.com
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream "$STAGING_SHA"; git merge --no-edit "$STAGING_SHA"
+      - uses: docker/setup-buildx-action@v4
+      - name: Exact fork-style app build
+        uses: docker/bake-action@v7
+        env:
+          ECR_REGISTRY: ''
+          ECR_REPO: ''
+          NEXT_PUBLIC_AUTH_PROVIDERS: ''
+          NEXT_PUBLIC_GITHUB_CLIENT_ID: ''
+          NEXT_PUBLIC_GOOGLE_CLIENT_ID: ''
+          NEXT_PUBLIC_BILLING_ENABLED: ''
+          NEXT_PUBLIC_GAS_SPONSORSHIP_ENABLED: ''
+          NEXT_PUBLIC_SENTRY_DSN: ''
+        with:
+          files: docker-bake.hcl
+          targets: app
+          push: false
