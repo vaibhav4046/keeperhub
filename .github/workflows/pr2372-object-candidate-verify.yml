@@ -1,0 +1,120 @@
+name: PR 2372 exact candidate verify
+
+on:
+  push:
+    branches:
+      - automation/pr2372-object-candidate-verify-20260917
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 94fd6541a8f824478cc78e8eee595b609e3aa2e0
+          fetch-depth: 0
+
+      - name: Pin exact candidate and base
+        run: |
+          set -euo pipefail
+          candidate=94fd6541a8f824478cc78e8eee595b609e3aa2e0
+          base=b79f9009a79b07d571f6322dd190fae72da2fdc3
+          test "$(git rev-parse HEAD)" = "$candidate"
+          test "$(git merge-base "$base" HEAD)" = "$base"
+          test "$(git rev-list --count HEAD.."$base")" = "0"
+          test "$(git diff --name-only "$base" HEAD | wc -l)" = "36"
+          git diff --quiet "$base" HEAD -- .github/workflows/contracts-checked.yml
+          cat > /tmp/expected.txt <<'EOF'
+          app/api/execute/[...slug]/route.ts
+          app/api/execute/_lib/execution-service.ts
+          app/api/execute/check-and-execute/route.ts
+          app/api/execute/contract-call/route.ts
+          app/api/execute/node/route.ts
+          app/api/execute/transfer/route.ts
+          docs/api/direct-execution.md
+          lib/idempotency-disposition.ts
+          lib/idempotency.ts
+          lib/web3/sponsored-send-error.ts
+          lib/web3/submit-signed.ts
+          plugins/robinhood/steps/trade-stock-token-core.ts
+          plugins/tempo/steps/batch-payout.ts
+          plugins/tempo/steps/dex-swap.ts
+          plugins/tempo/steps/tempo-tx-core.ts
+          plugins/tempo/steps/transfer-with-memo.ts
+          plugins/web3/steps/approve-token-core.ts
+          plugins/web3/steps/batch-write-contract-core.ts
+          plugins/web3/steps/call-solana-program-core.ts
+          plugins/web3/steps/send-raw-solana-instruction-core.ts
+          plugins/web3/steps/transfer-funds-core.ts
+          plugins/web3/steps/transfer-spl-token-core.ts
+          plugins/web3/steps/transfer-token-core.ts
+          plugins/web3/steps/write-contract-core.ts
+          specs/api-coverage.json
+          tests/integration/execute-node-reserved-fields.test.ts
+          tests/unit/call-solana-program.test.ts
+          tests/unit/execute-protocol-idempotency-disposition.test.ts
+          tests/unit/execute-protocol-required-params.test.ts
+          tests/unit/execution-service-safe-inner-failure.test.ts
+          tests/unit/idempotency-disposition-evidence.test.ts
+          tests/unit/idempotency.test.ts
+          tests/unit/send-raw-solana-instruction.test.ts
+          tests/unit/submit-signed.test.ts
+          tests/unit/transfer-spl-token.test.ts
+          tests/unit/write-contract-core.test.ts
+          EOF
+          sed -i 's/^          //' /tmp/expected.txt
+          git diff --name-only "$base" HEAD | sort > /tmp/actual.txt
+          sort /tmp/expected.txt -o /tmp/expected.txt
+          diff -u /tmp/expected.txt /tmp/actual.txt
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install and discover
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm discover-plugins
+
+      - name: Focused safety regressions
+        run: |
+          pnpm exec vitest run \
+            tests/integration/execute-node-reserved-fields.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/send-raw-solana-instruction.test.ts \
+            tests/unit/call-solana-program.test.ts \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/unit/idempotency.test.ts \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/transfer-spl-token.test.ts \
+            tests/unit/write-contract-core.test.ts
+
+      - name: Typecheck and API docs
+        run: |
+          set -euo pipefail
+          pnpm type-check
+          pnpm check:api-docs
+          before="$(sha256sum specs/api-coverage.json | cut -d' ' -f1)"
+          pnpm check:api-docs
+          after="$(sha256sum specs/api-coverage.json | cut -d' ' -f1)"
+          test "$before" = "$after"
+
+      - name: Biome and diff safety
+        run: |
+          set -euo pipefail
+          base=b79f9009a79b07d571f6322dd190fae72da2fdc3
+          mapfile -t changed < <(git diff --name-only "$base" HEAD)
+          pnpm exec biome check "${changed[@]}"
+          git diff --check "$base" HEAD
+          test -z "$(git diff --name-only --diff-filter=U)"
+          ! git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- . ':!pnpm-lock.yaml'
