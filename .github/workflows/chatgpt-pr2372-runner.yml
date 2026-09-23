@@ -1,10 +1,115 @@
 name: PR 2372 guarded runner
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - chatgpt-pr2372-runner
+
 permissions:
   contents: write
+
 jobs:
-  placeholder:
+  apply-and-verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - run: echo "runner staged"
+      - name: Check out runner payload
+        uses: actions/checkout@v4
+        with:
+          path: payload
+
+      - name: Reconstruct and verify resolved patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat payload/.chatgpt-pr2372/patch.b64.part* | base64 --decode | gzip -d > /tmp/pr2372.patch
+          test "$(wc -c < /tmp/pr2372.patch)" = "144867"
+          test "$(sha256sum /tmp/pr2372.patch | awk '{print $1}')" = "9bb2b8df7bbe39b456b6b22bb1bff360c7d112046e325effb8192a607049f1f5"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+          run_install: false
+
+      - name: Prepare guarded repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/vaibhav4046/keeperhub.git" work
+          cd work
+          git fetch origin fix/issue-1840-release-key-on-definite-failure
+          REMOTE_HEAD="$(git rev-parse origin/fix/issue-1840-release-key-on-definite-failure)"
+          test "$REMOTE_HEAD" = "439bfed6f8b9d036eb8d698a8ad5844ba58a149a"
+          git fetch https://github.com/KeeperHub/keeperhub.git staging:refs/remotes/upstream-staging
+          STAGING="$(git rev-parse refs/remotes/upstream-staging)"
+          test "$STAGING" = "a26b7dbb10ac9886730a4ac31c8c938000fbb2dd"
+          git checkout --detach "$STAGING"
+          git apply --check /tmp/pr2372.patch
+          git apply /tmp/pr2372.patch
+          git diff --check
+
+      - name: Install dependencies
+        working-directory: work
+        run: pnpm install --frozen-lockfile
+
+      - name: Focused tests
+        working-directory: work
+        run: |
+          pnpm vitest run \
+            tests/unit/tempo-broadcast-due.test.ts \
+            tests/unit/tempo-broadcast-stored.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/evm-chain-adapter-tempo-confirm.test.ts \
+            tests/unit/broadcast-attempted-core-evidence.test.ts \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/integration/execute-node-reserved-fields.test.ts
+
+      - name: Type check
+        working-directory: work
+        run: pnpm type-check
+
+      - name: Biome
+        working-directory: work
+        run: |
+          pnpm biome check \
+            app/api/execute/'[...slug]'/route.ts \
+            app/api/execute/_lib/execution-service.ts \
+            app/api/execute/node/route.ts \
+            docs/api/direct-execution.md \
+            lib/idempotency.ts \
+            lib/tempo/broadcast-due.ts \
+            lib/tempo/held-payments.ts \
+            lib/web3/chain-adapter/evm.ts \
+            lib/web3/submit-signed.ts \
+            plugins/tempo/steps/tempo-tx-core.ts \
+            specs/api-coverage.json \
+            tests/integration/execute-node-reserved-fields.test.ts \
+            tests/unit/tempo-broadcast-due.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/evm-chain-adapter-tempo-confirm.test.ts \
+            tests/unit/broadcast-attempted-core-evidence.test.ts
+
+      - name: Create and push guarded merge
+        working-directory: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          OLD_HEAD="439bfed6f8b9d036eb8d698a8ad5844ba58a149a"
+          STAGING="a26b7dbb10ac9886730a4ac31c8c938000fbb2dd"
+          git add -A
+          TREE="$(git write-tree)"
+          git config user.name "vaibhav4046"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          NEW_COMMIT="$(printf '%s\n' 'fix: resolve PR #2372 review against current staging' | git commit-tree "$TREE" -p "$OLD_HEAD" -p "$STAGING")"
+          git merge-base --is-ancestor "$OLD_HEAD" "$NEW_COMMIT"
+          test "$(git show -s --format='%P' "$NEW_COMMIT")" = "$OLD_HEAD $STAGING"
+          git push origin "$NEW_COMMIT":refs/heads/fix/issue-1840-release-key-on-definite-failure
