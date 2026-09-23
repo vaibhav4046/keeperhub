@@ -1,0 +1,237 @@
+name: PR 2372 exact guarded completion
+
+on:
+  push:
+    branches:
+      - chatgpt-pr2372-runner
+
+permissions:
+  contents: write
+
+jobs:
+  complete-pr2372:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out reconstruction payload
+        uses: actions/checkout@v4
+        with:
+          path: payload
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+          run_install: false
+
+      - name: Reconstruct exact review-fix and prepared merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/vaibhav4046/keeperhub.git" work
+          cd work
+
+          git fetch origin fix/issue-1840-release-key-on-definite-failure
+          PUBLISHED_HEAD="$(git rev-parse origin/fix/issue-1840-release-key-on-definite-failure)"
+          test "$PUBLISHED_HEAD" = "439bfed6f8b9d036eb8d698a8ad5844ba58a149a"
+
+          git fetch https://github.com/KeeperHub/keeperhub.git staging:refs/remotes/upstream-staging
+          STAGING="$(git rev-parse refs/remotes/upstream-staging)"
+          test "$STAGING" = "a26b7dbb10ac9886730a4ac31c8c938000fbb2dd"
+
+          git checkout --detach "$PUBLISHED_HEAD"
+
+          python - <<'PY'
+          import base64
+          import json
+          import pathlib
+          import subprocess
+
+          manifest = json.loads(pathlib.Path('../payload/.chatgpt-pr2372/review-fix-manifest.json').read_text())
+
+          def read_varint(data, pos):
+              value = 0
+              shift = 0
+              while True:
+                  byte = data[pos]
+                  pos += 1
+                  value |= (byte & 0x7f) << shift
+                  if not (byte & 0x80):
+                      return value, pos
+                  shift += 7
+
+          def apply_delta(base, delta):
+              pos = 0
+              base_size, pos = read_varint(delta, pos)
+              result_size, pos = read_varint(delta, pos)
+              if base_size != len(base):
+                  raise RuntimeError(f'base size mismatch: {base_size} != {len(base)}')
+              out = bytearray()
+              while pos < len(delta):
+                  op = delta[pos]
+                  pos += 1
+                  if op & 0x80:
+                      offset = 0
+                      size = 0
+                      if op & 0x01:
+                          offset |= delta[pos]; pos += 1
+                      if op & 0x02:
+                          offset |= delta[pos] << 8; pos += 1
+                      if op & 0x04:
+                          offset |= delta[pos] << 16; pos += 1
+                      if op & 0x08:
+                          offset |= delta[pos] << 24; pos += 1
+                      if op & 0x10:
+                          size |= delta[pos]; pos += 1
+                      if op & 0x20:
+                          size |= delta[pos] << 8; pos += 1
+                      if op & 0x40:
+                          size |= delta[pos] << 16; pos += 1
+                      if size == 0:
+                          size = 0x10000
+                      out += base[offset:offset + size]
+                  elif op:
+                      out += delta[pos:pos + op]
+                      pos += op
+                  else:
+                      raise RuntimeError('invalid delta opcode')
+              if len(out) != result_size:
+                  raise RuntimeError(f'result size mismatch: {len(out)} != {result_size}')
+              return bytes(out)
+
+          for entry in manifest:
+              path = pathlib.Path(entry['path'])
+              path.parent.mkdir(parents=True, exist_ok=True)
+              if 'full' in entry:
+                  content = base64.b64decode(entry['full'])
+              else:
+                  current = subprocess.check_output(['git', 'hash-object', entry['path']], text=True).strip()
+                  if current != entry['base']:
+                      raise RuntimeError(f"base blob guard failed for {entry['path']}: {current}")
+                  base = subprocess.check_output(['git', 'cat-file', 'blob', entry['base']])
+                  content = apply_delta(base, base64.b64decode(entry['delta']))
+              path.write_bytes(content)
+              if 'target' in entry:
+                  actual = subprocess.check_output(['git', 'hash-object', entry['path']], text=True).strip()
+                  if actual != entry['target']:
+                      raise RuntimeError(f"target blob guard failed for {entry['path']}: {actual}")
+          PY
+
+          git diff --check
+          git add \
+            lib/tempo/broadcast-due.ts \
+            lib/tempo/held-payments.ts \
+            lib/web3/chain-adapter/evm.ts \
+            lib/web3/submit-signed.ts \
+            plugins/tempo/steps/tempo-tx-core.ts \
+            tests/unit/tempo-broadcast-due.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/evm-chain-adapter-tempo-confirm.test.ts \
+            tests/unit/broadcast-attempted-core-evidence.test.ts
+
+          REVIEW_TREE="$(git write-tree)"
+          test "$REVIEW_TREE" = "9c0007acff04cba7c8d9f9636048ce145f56c735"
+
+          cat > /tmp/review-commit.txt <<EOF
+          tree 9c0007acff04cba7c8d9f9636048ce145f56c735
+          parent 439bfed6f8b9d036eb8d698a8ad5844ba58a149a
+          author Instinct Agent <agent@instinct.com> 1790116743 +0100
+          committer Instinct Agent <agent@instinct.com> 1790116743 +0100
+
+          fix: settle requested broadcast review gaps
+          EOF
+          REVIEW_COMMIT="$(git hash-object -t commit -w /tmp/review-commit.txt)"
+          test "$REVIEW_COMMIT" = "6e356165ff976dc027fb507bdedc6b21607e33df"
+
+          git reset --hard "$REVIEW_COMMIT"
+          git merge --no-commit --no-ff "$STAGING"
+          test -z "$(git ls-files -u)"
+          MERGE_TREE="$(git write-tree)"
+          test "$MERGE_TREE" = "51aeb54d86d0e2cf648265e855cdb31021712a87"
+
+          cat > /tmp/merge-commit.txt <<EOF
+          tree 51aeb54d86d0e2cf648265e855cdb31021712a87
+          parent 6e356165ff976dc027fb507bdedc6b21607e33df
+          parent a26b7dbb10ac9886730a4ac31c8c938000fbb2dd
+          author Instinct Agent <agent@instinct.com> 1790122082 +0100
+          committer Instinct Agent <agent@instinct.com> 1790122082 +0100
+
+          Merge current staging into PR #2372 branch
+          EOF
+          MERGE_COMMIT="$(git hash-object -t commit -w /tmp/merge-commit.txt)"
+          test "$MERGE_COMMIT" = "ec999d3e5b43252db7135476bcfdaff4cfdda578"
+
+          git reset --hard "$MERGE_COMMIT"
+          git merge-base --is-ancestor "$PUBLISHED_HEAD" HEAD
+          test "$(git show -s --format='%P' HEAD)" = "6e356165ff976dc027fb507bdedc6b21607e33df a26b7dbb10ac9886730a4ac31c8c938000fbb2dd"
+
+      - name: Install dependencies
+        working-directory: work
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate gitignored plugin registries
+        working-directory: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm discover-plugins
+          test -z "$(git status --porcelain --untracked-files=no)"
+
+      - name: Focused verification tests
+        working-directory: work
+        run: |
+          pnpm vitest run \
+            tests/unit/tempo-broadcast-due.test.ts \
+            tests/unit/tempo-broadcast-stored.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/evm-chain-adapter-tempo-confirm.test.ts \
+            tests/unit/broadcast-attempted-core-evidence.test.ts \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/idempotency-disposition-evidence.test.ts \
+            tests/integration/execute-node-reserved-fields.test.ts
+
+      - name: Type check
+        working-directory: work
+        run: pnpm type-check
+
+      - name: Biome verification
+        working-directory: work
+        run: |
+          pnpm biome check \
+            'app/api/execute/[...slug]/route.ts' \
+            app/api/execute/_lib/execution-service.ts \
+            app/api/execute/node/route.ts \
+            docs/api/direct-execution.md \
+            lib/idempotency.ts \
+            lib/tempo/broadcast-due.ts \
+            lib/tempo/held-payments.ts \
+            lib/web3/chain-adapter/evm.ts \
+            lib/web3/submit-signed.ts \
+            plugins/tempo/steps/tempo-tx-core.ts \
+            specs/api-coverage.json \
+            tests/integration/execute-node-reserved-fields.test.ts \
+            tests/unit/tempo-broadcast-due.test.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/evm-chain-adapter-tempo-confirm.test.ts \
+            tests/unit/broadcast-attempted-core-evidence.test.ts
+
+      - name: Recheck live guards and fast-forward push
+        working-directory: work
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin fix/issue-1840-release-key-on-definite-failure
+          test "$(git rev-parse FETCH_HEAD)" = "439bfed6f8b9d036eb8d698a8ad5844ba58a149a"
+          git fetch https://github.com/KeeperHub/keeperhub.git staging:refs/remotes/upstream-staging-final
+          test "$(git rev-parse refs/remotes/upstream-staging-final)" = "a26b7dbb10ac9886730a4ac31c8c938000fbb2dd"
+          test "$(git rev-parse HEAD)" = "ec999d3e5b43252db7135476bcfdaff4cfdda578"
+          git push origin HEAD:fix/issue-1840-release-key-on-definite-failure
