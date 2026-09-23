@@ -150,7 +150,7 @@ jobs:
           test "$REVIEW_COMMIT" = "6e356165ff976dc027fb507bdedc6b21607e33df"
 
           git reset --hard "$REVIEW_COMMIT"
-          git merge --no-commit --no-ff "$STAGING"
+          git -c user.name='Instinct Agent' -c user.email='agent@instinct.com' merge --no-commit --no-ff "$STAGING"
           test -z "$(git ls-files -u)"
           MERGE_TREE="$(git write-tree)"
           test "$MERGE_TREE" = "51aeb54d86d0e2cf648265e855cdb31021712a87"
