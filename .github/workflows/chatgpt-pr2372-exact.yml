@@ -183,6 +183,20 @@ jobs:
           pnpm discover-plugins
           test -z "$(git status --porcelain --untracked-files=no)"
 
+      - name: Repair package-only Biome formatting
+        working-directory: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "ec999d3e5b43252db7135476bcfdaff4cfdda578"
+          pnpm biome format --write tests/unit/broadcast-attempted-core-evidence.test.ts
+          test "$(git diff --name-only)" = "tests/unit/broadcast-attempted-core-evidence.test.ts"
+          git diff --check
+          git add tests/unit/broadcast-attempted-core-evidence.test.ts
+          git -c user.name='Instinct Agent' -c user.email='agent@instinct.com' commit -m "chore: format broadcast evidence test"
+          test "$(git rev-parse HEAD^)" = "ec999d3e5b43252db7135476bcfdaff4cfdda578"
+          git diff --ignore-all-space --exit-code ec999d3e5b43252db7135476bcfdaff4cfdda578..HEAD -- tests/unit/broadcast-attempted-core-evidence.test.ts
+
       - name: Focused verification tests
         working-directory: work
         run: |
@@ -233,5 +247,7 @@ jobs:
           test "$(git rev-parse FETCH_HEAD)" = "439bfed6f8b9d036eb8d698a8ad5844ba58a149a"
           git fetch https://github.com/KeeperHub/keeperhub.git staging:refs/remotes/upstream-staging-final
           test "$(git rev-parse refs/remotes/upstream-staging-final)" = "a26b7dbb10ac9886730a4ac31c8c938000fbb2dd"
-          test "$(git rev-parse HEAD)" = "ec999d3e5b43252db7135476bcfdaff4cfdda578"
+          git merge-base --is-ancestor ec999d3e5b43252db7135476bcfdaff4cfdda578 HEAD
+          test "$(git rev-parse HEAD^)" = "ec999d3e5b43252db7135476bcfdaff4cfdda578"
+          test "$(git diff --name-only ec999d3e5b43252db7135476bcfdaff4cfdda578..HEAD)" = "tests/unit/broadcast-attempted-core-evidence.test.ts"
           git push origin HEAD:fix/issue-1840-release-key-on-definite-failure
