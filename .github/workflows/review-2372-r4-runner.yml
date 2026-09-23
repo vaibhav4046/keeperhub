@@ -36,6 +36,9 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      - name: Generate plugin registry
+        run: pnpm discover-plugins
+
       - name: Format changed files
         shell: bash
         run: |
