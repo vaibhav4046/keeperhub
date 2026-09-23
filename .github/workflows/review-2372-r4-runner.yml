@@ -1,0 +1,90 @@
+name: PR 2372 review fix runner
+
+on:
+  push:
+    branches:
+      - review-2372-r4-fix
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Preserve fix script and reset to PR head
+        shell: bash
+        run: |
+          cp .github/review-2372-r4-fix.py /tmp/review-2372-r4-fix.py
+          git reset --hard a34cd4af8cb756af6a35324fdcd8f2fe1af67121
+          test "$(git rev-parse HEAD)" = "a34cd4af8cb756af6a35324fdcd8f2fe1af67121"
+          python /tmp/review-2372-r4-fix.py
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Format changed files
+        shell: bash
+        run: |
+          pnpm exec biome check --write \
+            lib/rpc/providers/index.ts \
+            lib/web3/submit-signed.ts \
+            plugins/tempo/steps/tempo-tx-core.ts \
+            plugins/web3/steps/transfer-token-core.ts \
+            plugins/web3/steps/approve-token-core.ts \
+            app/api/execute/node/route.ts \
+            lib/tempo/held-payments.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/tempo-broadcast-stored.test.ts
+
+      - name: Targeted regression tests
+        shell: bash
+        run: |
+          pnpm vitest run \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/tempo-broadcast-stored.test.ts \
+            tests/unit/broadcast-attempted-core-evidence.test.ts \
+            tests/unit/tempo-broadcast-due.test.ts \
+            tests/unit/tempo-broadcast-route.test.ts \
+            tests/unit/tempo-release-held-payment.test.ts \
+            tests/unit/execution-service-safe-inner-failure.test.ts \
+            tests/unit/execute-protocol-idempotency-disposition.test.ts
+
+      - name: Typecheck and API docs
+        shell: bash
+        run: |
+          pnpm type-check
+          pnpm check:api-docs
+
+      - name: Commit tested fix and push staging branch
+        shell: bash
+        run: |
+          git config user.name "vaibhav4046"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git add \
+            lib/rpc/providers/index.ts \
+            lib/web3/submit-signed.ts \
+            plugins/tempo/steps/tempo-tx-core.ts \
+            plugins/web3/steps/transfer-token-core.ts \
+            plugins/web3/steps/approve-token-core.ts \
+            app/api/execute/node/route.ts \
+            lib/tempo/held-payments.ts \
+            tests/unit/submit-signed.test.ts \
+            tests/unit/tempo-broadcast-stored.test.ts
+          git commit -m "fix: preserve broadcast uncertainty across retries"
+          git push origin HEAD:refs/heads/review-2372-r4-tested --force
+          echo "TESTED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git show --stat --oneline HEAD
