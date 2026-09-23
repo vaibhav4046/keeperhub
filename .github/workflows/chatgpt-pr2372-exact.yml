@@ -192,10 +192,19 @@ jobs:
           pnpm biome format --write tests/unit/broadcast-attempted-core-evidence.test.ts
           test "$(git diff --name-only)" = "tests/unit/broadcast-attempted-core-evidence.test.ts"
           git diff --check
+          python - <<'PY'
+          import re
+          import subprocess
+          from pathlib import Path
+          path = 'tests/unit/broadcast-attempted-core-evidence.test.ts'
+          before = subprocess.check_output(['git', 'show', f'ec999d3e5b43252db7135476bcfdaff4cfdda578:{path}'])
+          after = Path(path).read_bytes()
+          if re.sub(rb'\s+', b'', before) != re.sub(rb'\s+', b'', after):
+              raise SystemExit('formatter changed non-whitespace content')
+          PY
           git add tests/unit/broadcast-attempted-core-evidence.test.ts
           git -c user.name='Instinct Agent' -c user.email='agent@instinct.com' commit -m "chore: format broadcast evidence test"
           test "$(git rev-parse HEAD^)" = "ec999d3e5b43252db7135476bcfdaff4cfdda578"
-          git diff --ignore-all-space --exit-code ec999d3e5b43252db7135476bcfdaff4cfdda578..HEAD -- tests/unit/broadcast-attempted-core-evidence.test.ts
 
       - name: Focused verification tests
         working-directory: work
