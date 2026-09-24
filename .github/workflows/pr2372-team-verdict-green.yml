@@ -1,0 +1,145 @@
+name: PR 2372 team verdict GREEN
+
+on:
+  push:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: automation/pr2372-team-verdict-fix-20260924
+          fetch-depth: 0
+      - name: Require TDD starting head
+        run: test "$(git rev-parse HEAD)" = "1b125ecce87899c03ce5919252d4fa541c2ae589"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install and discover
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm discover-plugins
+      - name: Apply reviewed tests and implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          p = Path('tests/unit/reconcile-executions.test.ts')
+          s = p.read_text()
+          s = s.replace('type SelectCall = { orderBy?: SQL; limit?: number };', 'type SelectCall = { where?: SQL; orderBy?: SQL; limit?: number };', 1)
+          old = '''          where: () => ({\n            orderBy: (order: SQL) => {\n              call.orderBy = order;\n              return {\n                limit: (n: number) => {\n                  call.limit = n;\n                  return Promise.resolve(selectResults.shift() ?? []);\n                },\n              };\n            },\n          }),'''
+          new = '''          where: (condition: SQL) => {\n            call.where = condition;\n            return {\n              orderBy: (order: SQL) => {\n                call.orderBy = order;\n                return {\n                  limit: (n: number) => {\n                    call.limit = n;\n                    return Promise.resolve(selectResults.shift() ?? []);\n                  },\n                };\n              },\n            };\n          },'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          anchor = '  it("fails a conclusively reverted transaction", async () => {'
+          tests = '''  it("keeps a young hashless unconfirmed execution open", async () => {\n    const report = await run(\n      [directRow({ transactionHash: null, createdAt: minutesAgo(5) })],\n      []\n    );\n\n    expect(report.direct).toEqual({\n      examined: 1,\n      completed: 0,\n      failed: 0,\n      stillUnconfirmed: 1,\n      deferred: 0,\n    });\n    expect(mockVerify).not.toHaveBeenCalled();\n    expect(directUpdates()).toHaveLength(0);\n  });\n\n  it("terminalises a hashless unconfirmed execution after the dropped window", async () => {\n    const report = await run(\n      [\n        directRow({\n          transactionHash: null,\n          createdAt: new Date(NOW.getTime() - 25 * HOUR_MS),\n        }),\n      ],\n      []\n    );\n\n    expect(report.direct.failed).toBe(1);\n    expect(mockVerify).not.toHaveBeenCalled();\n    expect(directUpdates()[0].values).toEqual(\n      expect.objectContaining({\n        status: "failed",\n        error: expect.stringContaining("never confirmed"),\n        completedAt: expect.any(Date),\n      })\n    );\n  });\n\n'''
+          assert anchor in s
+          s = s.replace(anchor, tests + anchor, 1)
+          anchor = '  it("reads each table newest first up to the row cap, plus an oldest-first slice", async () => {'
+          selector_test = '''  it("selects hashless direct executions so they can age out", async () => {\n    await run([], []);\n\n    const { sql } = render(selectCalls[0].where);\n    expect(sql).toContain('"direct_executions"."status" =');\n    expect(sql).not.toContain('"direct_executions"."transaction_hash" is not null');\n  });\n\n'''
+          assert anchor in s
+          s = s.replace(anchor, selector_test + anchor, 1)
+          p.write_text(s)
+
+          p = Path('tests/unit/tempo-broadcast-due.test.ts')
+          s = p.read_text()
+          old = '''import { beforeEach, describe, expect, it, vi } from "vitest";\n\nvi.mock("server-only", () => ({}));\nvi.mock("@/lib/logging", () => ({\n  ErrorCategory: { NETWORK_RPC: "network_rpc" },\n  logInfo: vi.fn(),\n  logSystemWarn: vi.fn(),\n}));'''
+          new = '''import { beforeEach, describe, expect, it, vi } from "vitest";\n\nconst { mockLogWarn } = vi.hoisted(() => ({ mockLogWarn: vi.fn() }));\n\nvi.mock("server-only", () => ({}));\nvi.mock("@/lib/logging", () => ({\n  ErrorCategory: { NETWORK_RPC: "network_rpc" },\n  logInfo: vi.fn(),\n  logWarn: mockLogWarn,\n  logSystemWarn: vi.fn(),\n}));'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          old = '''    broadcastTxHash: null,\n    status: "pending",\n    ...over,'''
+          new = '''    broadcastTxHash: null,\n    status: "pending",\n    validBefore: Math.floor(Date.now() / 1000) + 3600,\n    ...over,'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          anchor = '  it("rotates an unreadable receipt behind newer broadcast rows", async () => {'
+          test = '''  it("terminalises an unconfirmed broadcast after validBefore plus grace", async () => {\n    broker.selectBroadcastToReconcile.mockResolvedValue([\n      row({\n        id: "p2",\n        status: "broadcast",\n        broadcastTxHash: "0xsent",\n        validBefore: Math.floor(Date.now() / 1000) - 120,\n      }),\n    ]);\n    mockCheckReceipt.mockResolvedValue("pending");\n\n    const res = await processDueHeldPayments();\n\n    expect(broker.markFailed).toHaveBeenCalledWith(\n      "p2",\n      expect.stringContaining("send outcome was never confirmed")\n    );\n    expect(broker.deferBroadcastReconcile).not.toHaveBeenCalled();\n    expect(mockLogWarn).toHaveBeenCalledWith(\n      "[Tempo Held] Broadcast validity window lapsed without a confirmed receipt",\n      expect.objectContaining({ payment_id: "p2", transaction_hash: "0xsent" })\n    );\n    expect(res.failed).toBe(1);\n    expect(res.stillPending).toBe(0);\n  });\n\n'''
+          assert anchor in s
+          s = s.replace(anchor, test + anchor, 1)
+          p.write_text(s)
+
+          p = Path('lib/execute/reconcile-executions.ts')
+          s = p.read_text()
+          old_import = 'import { and, asc, desc, eq, isNotNull, lt } from "drizzle-orm";'
+          assert old_import in s
+          s = s.replace(old_import, 'import { and, asc, desc, eq, lt } from "drizzle-orm";', 1)
+          old = '''  const chainId = resolveChainId(execution);\n  const hash = execution.transactionHash;\n  if (!hash || chainId === null) {\n    const settled = await settle(\n      execution.id,\n      "failed",\n      execution.receipts,\n      "Unable to verify transaction: chain could not be resolved"\n    );\n    return settledOutcome(settled, "failed");\n  }\n\n  const { allVerified, results } = await verifyExecutionReceipts(['''
+          new = '''  const chainId = resolveChainId(execution);\n  const hash = execution.transactionHash;\n  const age = now.getTime() - execution.createdAt.getTime();\n\n  // A hashless attempted send cannot be adjudicated on-chain. Keep the row\n  // open for the same conservative dropped window as a hash-bearing send; this\n  // ends caller polling only after the window expires and does not touch the\n  // idempotency record, which remains held for its own full TTL.\n  if (!hash) {\n    if (age < DROPPED_AFTER_MS) {\n      return "unconfirmed";\n    }\n    const settled = await settle(\n      execution.id,\n      "failed",\n      execution.receipts,\n      `Transaction send outcome was never confirmed and no transaction hash became available after ${Math.round(\n        DROPPED_AFTER_MS / 3_600_000\n      )}h`\n    );\n    return settledOutcome(settled, "failed");\n  }\n\n  if (chainId === null) {\n    const settled = await settle(\n      execution.id,\n      "failed",\n      execution.receipts,\n      "Unable to verify transaction: chain could not be resolved"\n    );\n    return settledOutcome(settled, "failed");\n  }\n\n  const { allVerified, results } = await verifyExecutionReceipts(['''
+          assert old in s
+          s = s.replace(old, new, 1)
+          old = '''  const age = now.getTime() - execution.createdAt.getTime();\n  if (age >= DROPPED_AFTER_MS) {'''
+          assert old in s
+          s = s.replace(old, '  if (age >= DROPPED_AFTER_MS) {', 1)
+          old = '''  const directEligible = and(\n    eq(directExecutions.status, "unconfirmed"),\n    isNotNull(directExecutions.transactionHash),\n    lt(directExecutions.createdAt, cutoff)\n  );'''
+          new = '''  const directEligible = and(\n    eq(directExecutions.status, "unconfirmed"),\n    lt(directExecutions.createdAt, cutoff)\n  );'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('lib/tempo/broadcast-due.ts')
+          s = p.read_text()
+          old_import = 'import { ErrorCategory, logInfo, logSystemWarn } from "@/lib/logging";'
+          assert old_import in s
+          s = s.replace(old_import, 'import { ErrorCategory, logInfo, logSystemWarn, logWarn } from "@/lib/logging";', 1)
+          old = 'const DEFAULT_LIMIT = 25;'
+          assert old in s
+          s = s.replace(old, '''const DEFAULT_LIMIT = 25;\n// validBefore is an on-chain expiry, but leave a short allowance for clock skew\n// and RPC indexing before terminalising a not-found deterministic hash.\nconst BROADCAST_EXPIRY_GRACE_MS = 60 * 1000;''', 1)
+          old = '''      } else {\n        // Keep unknown outcomes open, but rotate them behind newer rows so a\n        // bounded batch cannot be pinned forever by the same 25 hashes.\n        await deferBroadcastReconcile(row.id);\n        stillPending += 1;\n      }'''
+          new = '''      } else {\n        const expiredBeyondGrace =\n          Date.now() >= row.validBefore * 1000 + BROADCAST_EXPIRY_GRACE_MS;\n        if (expiredBeyondGrace) {\n          const reason = `Tempo transaction send outcome was never confirmed before validBefore plus grace (${row.broadcastTxHash})`;\n          await markFailed(row.id, reason);\n          logWarn(\n            "[Tempo Held] Broadcast validity window lapsed without a confirmed receipt",\n            {\n              payment_id: row.id,\n              transaction_hash: row.broadcastTxHash,\n              valid_before: String(row.validBefore),\n              grace_ms: String(BROADCAST_EXPIRY_GRACE_MS),\n            }\n          );\n          failed += 1;\n        } else {\n          // Keep live unknown outcomes open, but rotate them behind newer rows\n          // so a bounded batch cannot be pinned forever by the same hashes.\n          await deferBroadcastReconcile(row.id);\n          stillPending += 1;\n        }\n      }'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          for filename, start, end in [
+            ('plugins/web3/steps/transfer-token-core.ts', '      const tokenHolderAddress =', '    let receivedTransactionHash: string | undefined;'),
+            ('plugins/web3/steps/approve-token-core.ts', '      // Get token decimals and symbol via failover.', '    let receivedTransactionHash: string | undefined;'),
+          ]:
+            p = Path(filename)
+            s = p.read_text()
+            a = s.index(start)
+            b = s.index(end, a)
+            block = s[a:b]
+            block2 = ''.join(line[2:] if line.strip() else line for line in block.splitlines(keepends=True))
+            s = s[:a] + block2 + s[b:]
+            p.write_text(s)
+          PY
+
+          pnpm exec biome format --write \
+            lib/execute/reconcile-executions.ts \
+            lib/tempo/broadcast-due.ts \
+            plugins/web3/steps/transfer-token-core.ts \
+            plugins/web3/steps/approve-token-core.ts \
+            tests/unit/reconcile-executions.test.ts \
+            tests/unit/tempo-broadcast-due.test.ts
+
+      - name: Fresh GREEN verification
+        run: |
+          pnpm exec vitest run tests/unit/reconcile-executions.test.ts tests/unit/tempo-broadcast-due.test.ts
+          pnpm type-check
+          pnpm type-check:executor
+          pnpm check
+          git diff --check
+      - name: Commit verified fix to temp branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Vaibhav Lalwani"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git add \
+            lib/execute/reconcile-executions.ts \
+            lib/tempo/broadcast-due.ts \
+            plugins/web3/steps/transfer-token-core.ts \
+            plugins/web3/steps/approve-token-core.ts \
+            tests/unit/reconcile-executions.test.ts \
+            tests/unit/tempo-broadcast-due.test.ts
+          git diff --cached --check
+          git commit -m "fix: age out unresolved execution outcomes"
+          git push origin HEAD:automation/pr2372-team-verdict-fix-20260924
