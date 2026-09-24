@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const { mockLogWarn } = vi.hoisted(() => ({ mockLogWarn: vi.fn() }));
+
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/logging", () => ({
   ErrorCategory: { NETWORK_RPC: "network_rpc" },
   logInfo: vi.fn(),
+  logWarn: mockLogWarn,
   logSystemWarn: vi.fn(),
 }));
 vi.mock("@/lib/utils", async () =>
@@ -53,6 +56,7 @@ function row(over: Record<string, unknown> = {}) {
     precomputedHash: "0xhash",
     broadcastTxHash: null,
     status: "pending",
+    validBefore: Math.floor(Date.now() / 1000) + 3600,
     ...over,
   };
 }
@@ -165,6 +169,32 @@ describe("processDueHeldPayments - reconcile phase", () => {
     expect(broker.markFailed).not.toHaveBeenCalled();
     expect(broker.deferBroadcastReconcile).toHaveBeenCalledWith("p2");
     expect(res.stillPending).toBe(1);
+  });
+
+  it("terminalises an unconfirmed broadcast after validBefore plus grace", async () => {
+    broker.selectBroadcastToReconcile.mockResolvedValue([
+      row({
+        id: "p2",
+        status: "broadcast",
+        broadcastTxHash: "0xsent",
+        validBefore: Math.floor(Date.now() / 1000) - 120,
+      }),
+    ]);
+    mockCheckReceipt.mockResolvedValue("pending");
+
+    const res = await processDueHeldPayments();
+
+    expect(broker.markFailed).toHaveBeenCalledWith(
+      "p2",
+      expect.stringContaining("send outcome was never confirmed")
+    );
+    expect(broker.deferBroadcastReconcile).not.toHaveBeenCalled();
+    expect(mockLogWarn).toHaveBeenCalledWith(
+      "[Tempo Held] Broadcast validity window lapsed without a confirmed receipt",
+      expect.objectContaining({ payment_id: "p2", transaction_hash: "0xsent" })
+    );
+    expect(res.failed).toBe(1);
+    expect(res.stillPending).toBe(0);
   });
 
   it("rotates an unreadable receipt behind newer broadcast rows", async () => {

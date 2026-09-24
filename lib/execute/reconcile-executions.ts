@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, asc, desc, eq, isNotNull, lt } from "drizzle-orm";
+import { and, asc, desc, eq, lt } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   type DirectExecution,
@@ -190,7 +190,28 @@ async function reconcileOne(
 ): Promise<SettleOutcome> {
   const chainId = resolveChainId(execution);
   const hash = execution.transactionHash;
-  if (!hash || chainId === null) {
+  const age = now.getTime() - execution.createdAt.getTime();
+
+  // A hashless attempted send cannot be adjudicated on-chain. Keep the row
+  // open for the same conservative dropped window as a hash-bearing send; this
+  // ends caller polling only after the window expires and does not touch the
+  // idempotency record, which remains held for its own full TTL.
+  if (!hash) {
+    if (age < DROPPED_AFTER_MS) {
+      return "unconfirmed";
+    }
+    const settled = await settle(
+      execution.id,
+      "failed",
+      execution.receipts,
+      `Transaction send outcome was never confirmed and no transaction hash became available after ${Math.round(
+        DROPPED_AFTER_MS / 3_600_000
+      )}h`
+    );
+    return settledOutcome(settled, "failed");
+  }
+
+  if (chainId === null) {
     const settled = await settle(
       execution.id,
       "failed",
@@ -224,7 +245,6 @@ async function reconcileOne(
     return settledOutcome(settled, "failed");
   }
 
-  const age = now.getTime() - execution.createdAt.getTime();
   if (age >= DROPPED_AFTER_MS) {
     const settled = await settle(
       execution.id,
@@ -471,7 +491,6 @@ export async function reconcileUnconfirmedExecutions(
   };
   const directEligible = and(
     eq(directExecutions.status, "unconfirmed"),
-    isNotNull(directExecutions.transactionHash),
     lt(directExecutions.createdAt, cutoff)
   );
   const [newestDirect, oldestDirect] = await Promise.all([

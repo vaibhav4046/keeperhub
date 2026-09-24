@@ -582,81 +582,81 @@ async function transferTokenCoreImpl(
     // Create contract instance for the actual write (needs signer)
     const contract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
 
-      const tokenHolderAddress =
-        signerMode.kind === SIGNER_MODE.SAFE_ROLE || signerMode.kind === SIGNER_MODE.SAFE
-          ? signerMode.safeAddress
-          : signerAddress;
+    const tokenHolderAddress =
+      signerMode.kind === SIGNER_MODE.SAFE_ROLE || signerMode.kind === SIGNER_MODE.SAFE
+        ? signerMode.safeAddress
+        : signerAddress;
 
-      let decimals: bigint;
-      let symbol: string;
-      let balance: bigint;
-      try {
-        [decimals, symbol, balance] = await rpcManager.executeWithFailover((p) => {
-          const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, p);
-          return Promise.all([
-            tokenContract.decimals() as Promise<bigint>,
-            tokenContract.symbol() as Promise<string>,
-            tokenContract.balanceOf(tokenHolderAddress) as Promise<bigint>,
-          ]);
-        });
-      } catch (error) {
-        return {
-          success: false,
-          error: `Failed to read token metadata or balance: ${getErrorMessage(error)}`,
-        };
-      }
+    let decimals: bigint;
+    let symbol: string;
+    let balance: bigint;
+    try {
+      [decimals, symbol, balance] = await rpcManager.executeWithFailover((p) => {
+        const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, p);
+        return Promise.all([
+          tokenContract.decimals() as Promise<bigint>,
+          tokenContract.symbol() as Promise<string>,
+          tokenContract.balanceOf(tokenHolderAddress) as Promise<bigint>,
+        ]);
+      });
+    } catch (error) {
+      return {
+        success: false,
+        error: `Failed to read token metadata or balance: ${getErrorMessage(error)}`,
+      };
+    }
 
-      const decimalsNum = Number(decimals);
+    const decimalsNum = Number(decimals);
 
-      // `amount` is in the units the holder is shown. On an ERC-8056 token
-      // those are UI units and `transfer` takes raw ones, so the typed amount
-      // converts down and the on-chain balance converts up before the two are
-      // compared. Identity for every ordinary ERC-20. Refuses rather than
-      // guessing: an unscaled fallback would move several times the ask.
-      const multiplierResult = await resolveForWrite(
-        (op) => rpcManager.executeWithFailover(op),
-        chainId,
-        tokenAddress
+    // `amount` is in the units the holder is shown. On an ERC-8056 token
+    // those are UI units and `transfer` takes raw ones, so the typed amount
+    // converts down and the on-chain balance converts up before the two are
+    // compared. Identity for every ordinary ERC-20. Refuses rather than
+    // guessing: an unscaled fallback would move several times the ask.
+    const multiplierResult = await resolveForWrite(
+      (op) => rpcManager.executeWithFailover(op),
+      chainId,
+      tokenAddress
+    );
+    if (!multiplierResult.ok) {
+      return {
+        success: false,
+        error: getErrorMessage(multiplierResult.error),
+      };
+    }
+    const uiMultiplier = multiplierResult.multiplier;
+
+    // Convert amount to raw units
+    let amountRaw: bigint;
+    try {
+      const converted = convertAmountForWrite(
+        ethers.parseUnits(amount, decimalsNum),
+        uiMultiplier
       );
-      if (!multiplierResult.ok) {
-        return {
-          success: false,
-          error: getErrorMessage(multiplierResult.error),
-        };
+      if (!converted.ok) {
+        return { success: false, error: converted.error };
       }
-      const uiMultiplier = multiplierResult.multiplier;
+      amountRaw = converted.raw;
+    } catch (error) {
+      return {
+        success: false,
+        error: `Invalid amount format: ${getErrorMessage(error)}`,
+      };
+    }
 
-      // Convert amount to raw units
-      let amountRaw: bigint;
-      try {
-        const converted = convertAmountForWrite(
-          ethers.parseUnits(amount, decimalsNum),
-          uiMultiplier
-        );
-        if (!converted.ok) {
-          return { success: false, error: converted.error };
-        }
-        amountRaw = converted.raw;
-      } catch (error) {
-        return {
-          success: false,
-          error: `Invalid amount format: ${getErrorMessage(error)}`,
-        };
-      }
-
-      // Check balance before transfer
-      if (balance < amountRaw) {
-        // Report the shortfall in the same units the caller asked in, or the
-        // message compares a UI figure against a raw one and reads as nonsense.
-        const balanceFormatted = ethers.formatUnits(
-          rawToUi(balance, uiMultiplier),
-          decimalsNum
-        );
-        return {
-          success: false,
-          error: `Insufficient ${symbol} balance. Have: ${balanceFormatted}, Need: ${amount}`,
-        };
-      }
+    // Check balance before transfer
+    if (balance < amountRaw) {
+      // Report the shortfall in the same units the caller asked in, or the
+      // message compares a UI figure against a raw one and reads as nonsense.
+      const balanceFormatted = ethers.formatUnits(
+        rawToUi(balance, uiMultiplier),
+        decimalsNum
+      );
+      return {
+        success: false,
+        error: `Insufficient ${symbol} balance. Have: ${balanceFormatted}, Need: ${amount}`,
+      };
+    }
 
     let receivedTransactionHash: string | undefined;
     try {

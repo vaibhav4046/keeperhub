@@ -484,82 +484,82 @@ async function approveTokenCoreImpl(
     // Keep contract instance for error formatting in catch block
     const contract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
 
-      // Get token decimals and symbol via failover. This is a read-only
-      // preflight: a decode/RPC failure here proves no broadcast was attempted.
-      let decimals: bigint;
-      let symbol: string;
+    // Get token decimals and symbol via failover. This is a read-only
+    // preflight: a decode/RPC failure here proves no broadcast was attempted.
+    let decimals: bigint;
+    let symbol: string;
+    try {
+      [decimals, symbol] = await rpcManager.executeWithFailover((p) => {
+        const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, p);
+        return Promise.all([
+          tokenContract.decimals() as Promise<bigint>,
+          tokenContract.symbol() as Promise<string>,
+        ]);
+      });
+    } catch (error) {
+      return {
+        success: false,
+        error: `Failed to read token metadata: ${getErrorMessage(error)}`,
+      };
+    }
+
+    const decimalsNum = Number(decimals);
+
+    // Convert amount to raw units (handle "max" for unlimited approval)
+    let amountRaw: bigint;
+    let approvedAmountDisplay: string;
+    if (amount.trim().toLowerCase() === "max") {
+      amountRaw = ethers.MaxUint256;
+      approvedAmountDisplay = "unlimited";
+    } else {
+      const multiplier = await resolveForWrite(
+        (op) => rpcManager.executeWithFailover(op),
+        chainId,
+        tokenAddress
+      );
+      if (!multiplier.ok) {
+        return { success: false, error: getErrorMessage(multiplier.error) };
+      }
       try {
-        [decimals, symbol] = await rpcManager.executeWithFailover((p) => {
-          const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, p);
-          return Promise.all([
-            tokenContract.decimals() as Promise<bigint>,
-            tokenContract.symbol() as Promise<string>,
-          ]);
-        });
+        // Same conversion as the sponsored branch above: an allowance is
+        // spent in raw units, so a UI amount converts down. Identity for
+        // every ordinary ERC-20.
+        const converted = convertAmountForWrite(
+          ethers.parseUnits(amount, decimalsNum),
+          multiplier.multiplier
+        );
+        if (!converted.ok) {
+          return { success: false, error: converted.error };
+        }
+        amountRaw = converted.raw;
+        approvedAmountDisplay = amount;
       } catch (error) {
         return {
           success: false,
-          error: `Failed to read token metadata: ${getErrorMessage(error)}`,
+          error: `Invalid amount format: ${getErrorMessage(error)}`,
         };
       }
+    }
 
-      const decimalsNum = Number(decimals);
-
-      // Convert amount to raw units (handle "max" for unlimited approval)
-      let amountRaw: bigint;
-      let approvedAmountDisplay: string;
-      if (amount.trim().toLowerCase() === "max") {
-        amountRaw = ethers.MaxUint256;
-        approvedAmountDisplay = "unlimited";
-      } else {
-        const multiplier = await resolveForWrite(
-          (op) => rpcManager.executeWithFailover(op),
-          chainId,
-          tokenAddress
-        );
-        if (!multiplier.ok) {
-          return { success: false, error: getErrorMessage(multiplier.error) };
-        }
-        try {
-          // Same conversion as the sponsored branch above: an allowance is
-          // spent in raw units, so a UI amount converts down. Identity for
-          // every ordinary ERC-20.
-          const converted = convertAmountForWrite(
-            ethers.parseUnits(amount, decimalsNum),
-            multiplier.multiplier
-          );
-          if (!converted.ok) {
-            return { success: false, error: converted.error };
-          }
-          amountRaw = converted.raw;
-          approvedAmountDisplay = amount;
-        } catch (error) {
-          return {
-            success: false,
-            error: `Invalid amount format: ${getErrorMessage(error)}`,
-          };
-        }
-      }
-
-      // Same ceiling as the sponsored branch above. Both reach ERC-20 approve
-      // directly without passing through writeContractCore, so each needs the
-      // check on its own: this is the Safe/EOA path.
-      const stablecoinCap = await checkStablecoinContractCall({
-        organizationId,
-        chainId,
-        contractAddress: tokenAddress,
-        functionName: "approve",
-        inputTypes: ["address", "uint256"],
-        args: [spenderAddress, amountRaw],
-        context: "approve-token",
-      });
-      if (stablecoinCap.kind !== "allowed") {
-        return {
-          success: false,
-          error: stablecoinCap.error,
-          errorClass: ExecutionErrorType.USER,
-        };
-      }
+    // Same ceiling as the sponsored branch above. Both reach ERC-20 approve
+    // directly without passing through writeContractCore, so each needs the
+    // check on its own: this is the Safe/EOA path.
+    const stablecoinCap = await checkStablecoinContractCall({
+      organizationId,
+      chainId,
+      contractAddress: tokenAddress,
+      functionName: "approve",
+      inputTypes: ["address", "uint256"],
+      args: [spenderAddress, amountRaw],
+      context: "approve-token",
+    });
+    if (stablecoinCap.kind !== "allowed") {
+      return {
+        success: false,
+        error: stablecoinCap.error,
+        errorClass: ExecutionErrorType.USER,
+      };
+    }
 
     let receivedTransactionHash: string | undefined;
     try {

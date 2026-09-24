@@ -32,7 +32,7 @@ const {
 
 type Row = Record<string, unknown>;
 type UpdateCall = { table: unknown; values: Row; where?: SQL };
-type SelectCall = { orderBy?: SQL; limit?: number };
+type SelectCall = { where?: SQL; orderBy?: SQL; limit?: number };
 
 // Result sets handed out in call order: direct executions first, then
 // workflow runs, matching the order the reconciler queries them.
@@ -50,17 +50,20 @@ vi.mock("@/lib/db", () => ({
       selectCalls.push(call);
       return {
         from: () => ({
-          where: () => ({
-            orderBy: (order: SQL) => {
-              call.orderBy = order;
-              return {
-                limit: (n: number) => {
-                  call.limit = n;
-                  return Promise.resolve(selectResults.shift() ?? []);
-                },
-              };
-            },
-          }),
+          where: (condition: SQL) => {
+            call.where = condition;
+            return {
+              orderBy: (order: SQL) => {
+                call.orderBy = order;
+                return {
+                  limit: (n: number) => {
+                    call.limit = n;
+                    return Promise.resolve(selectResults.shift() ?? []);
+                  },
+                };
+              },
+            };
+          },
         }),
       };
     },
@@ -264,6 +267,45 @@ describe("direct executions", () => {
       receipts: [],
       completedAt: expect.any(Date),
     });
+  });
+
+  it("keeps a young hashless unconfirmed execution open", async () => {
+    const report = await run(
+      [directRow({ transactionHash: null, createdAt: minutesAgo(5) })],
+      []
+    );
+
+    expect(report.direct).toEqual({
+      examined: 1,
+      completed: 0,
+      failed: 0,
+      stillUnconfirmed: 1,
+      deferred: 0,
+    });
+    expect(mockVerify).not.toHaveBeenCalled();
+    expect(directUpdates()).toHaveLength(0);
+  });
+
+  it("terminalises a hashless unconfirmed execution after the dropped window", async () => {
+    const report = await run(
+      [
+        directRow({
+          transactionHash: null,
+          createdAt: new Date(NOW.getTime() - 25 * HOUR_MS),
+        }),
+      ],
+      []
+    );
+
+    expect(report.direct.failed).toBe(1);
+    expect(mockVerify).not.toHaveBeenCalled();
+    expect(directUpdates()[0].values).toEqual(
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("never confirmed"),
+        completedAt: expect.any(Date),
+      })
+    );
   });
 
   it("fails a conclusively reverted transaction", async () => {
@@ -538,6 +580,16 @@ describe("workflow runs held open by their own failure", () => {
 });
 
 describe("scheduling safety", () => {
+  it("selects hashless direct executions so they can age out", async () => {
+    await run([], []);
+
+    const { sql } = render(selectCalls[0].where);
+    expect(sql).toContain('"direct_executions"."status" =');
+    expect(sql).not.toContain(
+      '"direct_executions"."transaction_hash" is not null'
+    );
+  });
+
   it("reads each table newest first up to the row cap, plus an oldest-first slice", async () => {
     verifyResolves("success");
 

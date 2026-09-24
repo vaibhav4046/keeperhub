@@ -13,7 +13,7 @@
  */
 import "server-only";
 
-import { ErrorCategory, logInfo, logSystemWarn } from "@/lib/logging";
+import { ErrorCategory, logInfo, logSystemWarn, logWarn } from "@/lib/logging";
 import {
   claimHeldPayment,
   deferBroadcastReconcile,
@@ -32,6 +32,9 @@ import {
 } from "@/plugins/tempo/steps/tempo-tx-core";
 
 const DEFAULT_LIMIT = 25;
+// validBefore is an on-chain expiry, but leave a short allowance for clock skew
+// and RPC indexing before terminalising a not-found deterministic hash.
+const BROADCAST_EXPIRY_GRACE_MS = 60 * 1000;
 
 export type BroadcastDueResult = {
   expired: number;
@@ -110,10 +113,27 @@ async function reconcileBroadcastRows(limit: number): Promise<{
         );
         failed += 1;
       } else {
-        // Keep unknown outcomes open, but rotate them behind newer rows so a
-        // bounded batch cannot be pinned forever by the same 25 hashes.
-        await deferBroadcastReconcile(row.id);
-        stillPending += 1;
+        const expiredBeyondGrace =
+          Date.now() >= row.validBefore * 1000 + BROADCAST_EXPIRY_GRACE_MS;
+        if (expiredBeyondGrace) {
+          const reason = `Tempo transaction send outcome was never confirmed before validBefore plus grace (${row.broadcastTxHash})`;
+          await markFailed(row.id, reason);
+          logWarn(
+            "[Tempo Held] Broadcast validity window lapsed without a confirmed receipt",
+            {
+              payment_id: row.id,
+              transaction_hash: row.broadcastTxHash,
+              valid_before: String(row.validBefore),
+              grace_ms: String(BROADCAST_EXPIRY_GRACE_MS),
+            }
+          );
+          failed += 1;
+        } else {
+          // Keep live unknown outcomes open, but rotate them behind newer rows
+          // so a bounded batch cannot be pinned forever by the same hashes.
+          await deferBroadcastReconcile(row.id);
+          stillPending += 1;
+        }
       }
     } catch (error) {
       logSystemWarn(
