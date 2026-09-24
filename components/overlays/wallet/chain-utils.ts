@@ -7,12 +7,13 @@ export {
 } from "@/lib/wallet/build-withdrawable-assets";
 
 // Chains whose token lineup doesn't mirror Ethereum mainnet's stablecoin set
-// (e.g. Plasma ships USDT0, no Circle USDC, no Sky USDS). For these chains we
+// (e.g. Plasma ships USDT0, no Circle USDC, no Sky USDS; Unichain has no code
+// at Ethereum's USDT address and ships USD₮0 at a different one). For these chains we
 // render the chain's own supported_tokens rows directly instead of overlaying
 // them on the mainnet master list, which would otherwise produce misleading
 // "Not available" entries for assets that simply don't exist on the chain.
 const INDEPENDENT_TOKEN_LIST_CHAIN_IDS: ReadonlySet<number> = new Set([
-  42_431, 4217, 9745, 5042, 5_042_002,
+  42_431, 4217, 9745, 5042, 5_042_002, 130,
 ]);
 
 export { ETHEREUM_MAINNET_CHAIN_ID as MAINNET_CHAIN_ID } from "@/lib/chains/ids";

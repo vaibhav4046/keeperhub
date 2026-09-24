@@ -108,9 +108,29 @@ export const PUBLIC_RPCS = {
   // resolves too, unlike pre-launch, so it serves as publicFallback.
   ARC_MAINNET: "https://rpc.mainnet.arc.io",
   ARC_MAINNET_FALLBACK: "https://rpc.drpc.mainnet.arc.io",
-  // Blockdaemon's endpoint completes the WSS upgrade handshake with no API
-  // key required, unlike the Alchemy/QuickNode mirrors docs.arc.io lists.
-  ARC_MAINNET_WSS: "wss://rpc.blockdaemon.mainnet.arc.io/websocket",
+  // Unichain (Uniswap Labs' OP Stack L2, native gas is ETH). Chain IDs
+  // confirmed via eth_chainId against the official RPCs: mainnet returns
+  // 0x82 (130), Sepolia testnet returns 0x515 (1301). publicnode's WSS
+  // mirrors were verified live with a real eth_subscribe-capable connection
+  // on both networks, unlike Robinhood which has no public WSS.
+  UNICHAIN_MAINNET: "https://mainnet.unichain.org",
+  UNICHAIN_MAINNET_FALLBACK: "https://unichain.drpc.org",
+  UNICHAIN_MAINNET_WSS: "wss://unichain-rpc.publicnode.com",
+  UNICHAIN_SEPOLIA: "https://sepolia.unichain.org",
+  UNICHAIN_SEPOLIA_FALLBACK: "https://unichain-sepolia.drpc.org",
+  UNICHAIN_SEPOLIA_WSS: "wss://unichain-sepolia-rpc.publicnode.com",
+  // Circle's own host, mirroring the HTTP primary and the testnet WSS
+  // pattern. Blockdaemon's endpoint also completes the WSS upgrade with no
+  // API key required (unlike the Alchemy/QuickNode mirrors docs.arc.io
+  // lists), so it serves as the WSS fallback rather than the sole source.
+  ARC_MAINNET_WSS: "wss://rpc.mainnet.arc.io",
+  // Blockdaemon's socket idles out (code 1006) after ~61s of no outbound
+  // traffic, vs. 75s+ observed on Circle's. Both consumers ping every 30s: the
+  // event tracker's HEARTBEAT_INTERVAL_MS (provider-manager.ts) and the
+  // scheduler's PING_INTERVAL_MS (chain-monitor.ts, env-overridable), giving
+  // ~2x margin on both, but raising either above ~60s would make this
+  // fallback churn every minute.
+  ARC_MAINNET_WSS_FALLBACK: "wss://rpc.blockdaemon.mainnet.arc.io/websocket",
 } as const;
 
 /**
@@ -158,6 +178,24 @@ export const CHAIN_CONFIG: Record<number, ChainConfigEntry> = {
     envKey: "CHAIN_BASE_SEPOLIA_PRIMARY_RPC",
     fallbackEnvKey: "CHAIN_BASE_SEPOLIA_FALLBACK_RPC",
     publicDefault: PUBLIC_RPCS.BASE_SEPOLIA,
+  },
+  // Unichain Mainnet (Uniswap Labs' OP Stack L2)
+  130: {
+    jsonKey: "unichain-mainnet",
+    envKey: "CHAIN_UNICHAIN_MAINNET_PRIMARY_RPC",
+    fallbackEnvKey: "CHAIN_UNICHAIN_MAINNET_FALLBACK_RPC",
+    publicDefault: PUBLIC_RPCS.UNICHAIN_MAINNET,
+    publicFallback: PUBLIC_RPCS.UNICHAIN_MAINNET_FALLBACK,
+    publicWssDefault: PUBLIC_RPCS.UNICHAIN_MAINNET_WSS,
+  },
+  // Unichain Sepolia
+  1301: {
+    jsonKey: "unichain-testnet",
+    envKey: "CHAIN_UNICHAIN_SEPOLIA_PRIMARY_RPC",
+    fallbackEnvKey: "CHAIN_UNICHAIN_SEPOLIA_FALLBACK_RPC",
+    publicDefault: PUBLIC_RPCS.UNICHAIN_SEPOLIA,
+    publicFallback: PUBLIC_RPCS.UNICHAIN_SEPOLIA_FALLBACK,
+    publicWssDefault: PUBLIC_RPCS.UNICHAIN_SEPOLIA_WSS,
   },
   // Tempo Testnet
   42431: {
@@ -336,6 +374,7 @@ export const CHAIN_CONFIG: Record<number, ChainConfigEntry> = {
     publicDefault: PUBLIC_RPCS.ARC_MAINNET,
     publicFallback: PUBLIC_RPCS.ARC_MAINNET_FALLBACK,
     publicWssDefault: PUBLIC_RPCS.ARC_MAINNET_WSS,
+    publicWssFallback: PUBLIC_RPCS.ARC_MAINNET_WSS_FALLBACK,
   },
 };
 
