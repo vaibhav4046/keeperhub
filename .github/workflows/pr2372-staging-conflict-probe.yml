@@ -1,31 +1,28 @@
-name: PR 2372 latest staging conflict probe
+name: PR 2372 latest staging merge
 on:
   push:
+permissions:
+  contents: write
 jobs:
-  probe:
+  merge:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: automation/pr2372-final-candidate-20260924
           fetch-depth: 0
-      - name: Probe merge
+      - name: Merge exact latest staging and push candidate
         shell: bash
         run: |
-          set +e
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "21c1af8cb645771be6a64e5199950b9219869fb2"
+          test "$(git ls-remote origin refs/heads/automation/pr2372-final-candidate-20260924 | cut -f1)" = "21c1af8cb645771be6a64e5199950b9219869fb2"
           git remote add upstream https://github.com/KeeperHub/keeperhub.git
           git fetch upstream 9824f5820bb9a1065b45233fc70a22d5610288c0
+          test "$(git ls-remote upstream refs/heads/staging | cut -f1)" = "9824f5820bb9a1065b45233fc70a22d5610288c0"
           git config user.name "Vaibhav Lalwani"
           git config user.email "115102797+vaibhav4046@users.noreply.github.com"
-          git merge --no-commit --no-ff 9824f5820bb9a1065b45233fc70a22d5610288c0
-          rc=$?
-          echo "MERGE_RC=$rc"
-          echo "UNMERGED_PATHS_BEGIN"
-          git diff --name-only --diff-filter=U
-          echo "UNMERGED_PATHS_END"
-          for f in $(git diff --name-only --diff-filter=U); do
-            echo "===== CONFLICT: $f ====="
-            git checkout --conflict=merge -- "$f" || true
-            sed -n '1,260p' "$f" || true
-          done
-          exit 0
+          git merge --no-ff 9824f5820bb9a1065b45233fc70a22d5610288c0 -m "Merge current staging into PR 2372 candidate"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check 9824f5820bb9a1065b45233fc70a22d5610288c0...HEAD
+          git push origin HEAD:automation/pr2372-final-candidate-20260924
