@@ -1,0 +1,31 @@
+name: PR 2372 latest staging conflict probe
+on:
+  push:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: automation/pr2372-final-candidate-20260924
+          fetch-depth: 0
+      - name: Probe merge
+        shell: bash
+        run: |
+          set +e
+          git remote add upstream https://github.com/KeeperHub/keeperhub.git
+          git fetch upstream 9824f5820bb9a1065b45233fc70a22d5610288c0
+          git config user.name "Vaibhav Lalwani"
+          git config user.email "115102797+vaibhav4046@users.noreply.github.com"
+          git merge --no-commit --no-ff 9824f5820bb9a1065b45233fc70a22d5610288c0
+          rc=$?
+          echo "MERGE_RC=$rc"
+          echo "UNMERGED_PATHS_BEGIN"
+          git diff --name-only --diff-filter=U
+          echo "UNMERGED_PATHS_END"
+          for f in $(git diff --name-only --diff-filter=U); do
+            echo "===== CONFLICT: $f ====="
+            git checkout --conflict=merge -- "$f" || true
+            sed -n '1,260p' "$f" || true
+          done
+          exit 0
